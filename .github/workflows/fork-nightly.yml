@@ -104,7 +104,9 @@ jobs:
           # Fixed once per run, so re-running a later job keeps the same version.
           echo "nightly_date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
-          latest_body="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=1" --jq '.[0].body // ""' || true)"
+          # Newest published release; a draft left by an interrupted upload
+          # must not count as released.
+          latest_body="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=20" --jq '[.[] | select(.draft | not)][0].body // ""' || true)"
           build=true
           if [[ "$latest_body" == *"<!-- fork-nightly-key: ${key} -->"* ]]; then
             if [[ "$FORCE" == "true" ]]; then
@@ -497,7 +499,15 @@ jobs:
           # from a failed attempt. A published release on it means this
           # version is done; a draft (left by an interrupted upload) or a bare
           # tag is replaced.
-          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>"$RUNNER_TEMP/release-view.err")"; then
+            :
+          elif grep -q "release not found" "$RUNNER_TEMP/release-view.err"; then
+            existing=""
+          else
+            cat "$RUNNER_TEMP/release-view.err" >&2
+            echo "::error::Could not check whether release ${TAG} exists."
+            exit 1
+          fi
           if [[ "$existing" == "false" ]]; then
             echo "::error::Release ${TAG} is already published. Start a new run instead of re-running this one."
             exit 1
