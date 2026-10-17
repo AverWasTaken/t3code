@@ -516,6 +516,162 @@ it("adopts a runless nested subagent's thread only from an owned child thread", 
   assert.isFalse(afterStray.ownedThreadIds.has(strayThread));
 });
 
+it("follows a nested subagent its running subagent starts after the root turn ends", () => {
+  const threadId = ThreadId.make("thread:idle-nested");
+  const rootProviderTurnId = ProviderTurnId.make("provider-turn:idle-nested");
+  const identity: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:idle-nested"),
+    attemptId: RunAttemptId.make("attempt:idle-nested"),
+    providerThreadId: ProviderThreadId.make("provider-thread:idle-nested"),
+  };
+  const workerThread = ThreadId.make("thread:idle-nested:worker");
+  const scoutThread = ThreadId.make("thread:idle-nested:scout");
+  const childCreated = (
+    childThreadId: ThreadId,
+    parentThreadId: ThreadId,
+  ): ProviderAdapter.ProviderAdapterV2Event =>
+    ({
+      type: "app_thread.created",
+      driver,
+      appThread: {
+        id: childThreadId,
+        lineage: { parentThreadId, relationshipToParent: "subagent", rootThreadId: threadId },
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const subagent = (input: {
+    readonly threadId: ThreadId;
+    readonly runId: OrchestrationV2Subagent["runId"];
+    readonly childThreadId: ThreadId;
+    readonly status: OrchestrationV2Subagent["status"];
+  }): ProviderAdapter.ProviderAdapterV2Event => ({
+    type: "subagent.updated",
+    driver,
+    subagent: {
+      id: NodeId.make(`node:idle-nested:${input.childThreadId}`),
+      threadId: input.threadId,
+      runId: input.runId,
+      parentNodeId: NodeId.make("node:idle-nested:root"),
+      origin: "provider_native",
+      createdBy: "agent",
+      driver,
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      providerThreadId: null,
+      childThreadId: input.childThreadId,
+      nativeTaskRef: null,
+      prompt: "Look around",
+      title: "Agent",
+      model: null,
+      status: input.status,
+      result: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.makeUnsafe(0),
+    },
+  });
+  const route = (
+    event: ProviderAdapter.ProviderAdapterV2Event,
+    state: RunExecutionService.ProviderEventRoutingState,
+  ) => RunExecutionService.routeProviderEvent(event, identity, state);
+
+  let state = RunExecutionService.makeProviderEventRoutingState({
+    identity,
+    providerTurnId: rootProviderTurnId,
+  });
+  [, state] = route(childCreated(workerThread, threadId), state);
+  [, state] = route(
+    subagent({ threadId, runId: identity.runId, childThreadId: workerThread, status: "running" }),
+    state,
+  );
+  [, state] = route(
+    {
+      type: "turn.terminal",
+      driver,
+      providerThreadId: identity.providerThreadId,
+      providerTurnId: rootProviderTurnId,
+      runOrdinal: 1,
+      status: "completed",
+      failure: null,
+      threadDisposition: "reusable",
+    },
+    state,
+  );
+  assert.isTrue(state.rootTurnEnded);
+  const ended = state;
+
+  // The background worker this run still runs launches a scout while the root is idle.
+  const [scoutAccepted, afterScout] = route(childCreated(scoutThread, workerThread), ended);
+  assert.isTrue(scoutAccepted);
+  assert.isTrue(afterScout.ownedThreadIds.has(scoutThread));
+  assert.isTrue(
+    route(
+      subagent({
+        threadId: workerThread,
+        runId: null,
+        childThreadId: scoutThread,
+        status: "running",
+      }),
+      afterScout,
+    )[0],
+  );
+
+  // The running scout's own thread follows what it launches in turn (depth 3).
+  const [, scoutRunning] = route(
+    subagent({
+      threadId: workerThread,
+      runId: null,
+      childThreadId: scoutThread,
+      status: "running",
+    }),
+    afterScout,
+  );
+  const grandchildThread = ThreadId.make("thread:idle-nested:grandchild");
+  const [grandchildAccepted, afterGrandchild] = route(
+    childCreated(grandchildThread, scoutThread),
+    scoutRunning,
+  );
+  assert.isTrue(grandchildAccepted);
+  assert.isTrue(afterGrandchild.ownedThreadIds.has(grandchildThread));
+
+  // A runless nested subagent whose thread creation this run never saw is adopted.
+  const resumedThread = ThreadId.make("thread:idle-nested:resumed");
+  const resumed = subagent({
+    threadId: workerThread,
+    runId: null,
+    childThreadId: resumedThread,
+    status: "running",
+  });
+  const [, afterResumed] = route(resumed, ended);
+  assert.isTrue(afterResumed.ownedThreadIds.has(resumedThread));
+
+  // A subagent the root itself launches after its turn ended belongs to the live run.
+  const lateRootChild = ThreadId.make("thread:idle-nested:late-root-child");
+  const [lateAccepted, afterLate] = route(childCreated(lateRootChild, threadId), ended);
+  assert.isFalse(lateAccepted);
+  assert.isFalse(afterLate.ownedThreadIds.has(lateRootChild));
+
+  // Once the worker finished, a later child of its thread is not this run's.
+  const [, afterWorkerDone] = route(
+    subagent({ threadId, runId: identity.runId, childThreadId: workerThread, status: "completed" }),
+    ended,
+  );
+  const lateWorkerChild = ThreadId.make("thread:idle-nested:late-worker-child");
+  assert.isFalse(route(childCreated(lateWorkerChild, workerThread), afterWorkerDone)[0]);
+  assert.isFalse(route(resumed, afterWorkerDone)[1].ownedThreadIds.has(resumedThread));
+
+  // A worker a later run took over (resume) no longer keeps this run following its thread.
+  const [, afterReattributed] = route(
+    subagent({
+      threadId,
+      runId: RunId.make("run:idle-nested:later"),
+      childThreadId: workerThread,
+      status: "running",
+    }),
+    ended,
+  );
+  assert.isFalse(route(childCreated(lateWorkerChild, workerThread), afterReattributed)[0]);
+});
+
 it("does not route a superseded attempt through a reused provider thread", () => {
   const threadId = ThreadId.make("thread:shared-runtime:restart");
   const providerThreadId = ProviderThreadId.make("provider-thread:shared-runtime:restart");

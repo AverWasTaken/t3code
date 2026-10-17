@@ -8609,6 +8609,16 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           ),
         );
         assert.lengthOf(harness.continuationRequests, 0);
+        // Its owner still runs, so the nested subagent already shows, running.
+        const liveNested = harness.events.findLast(
+          (event) =>
+            event.type === "subagent.updated" &&
+            event.subagent.nativeTaskRef?.nativeId === NESTED_TASK_ID,
+        );
+        assert.equal(
+          liveNested?.type === "subagent.updated" && liveNested.subagent.status,
+          "running",
+        );
         for (const frame of [
           ...makeSubagentAssistantFrames({
             parentToolUseId: NESTED_TOOL_USE_ID,
@@ -8694,6 +8704,299 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           subagentRouting(harness.events, []).assistantTexts(outer?.childThreadId ?? undefined),
           ["OUTER_WORKING", "OUTER_DONE"],
         );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  const idleNestedHarness = Effect.fnUntraced(function* (input: {
+    readonly key: string;
+    readonly outerTaskId: string;
+    readonly outerToolUseId: string;
+    readonly nestedTaskId: string;
+    readonly nestedToolUseId: string;
+    readonly nestedBackgrounded: boolean;
+    readonly uuidPrefix: string;
+  }) {
+    const harness = yield* makeWakeHarness;
+    const now = yield* DateTime.now;
+    yield* harness.runtime.startTurn(
+      makeClaudeTestTurnInput({
+        threadId: harness.threadId,
+        providerThread: harness.providerThread,
+        now,
+        attemptId: RunAttemptId.make(`attempt-claude-${input.key}-1`),
+        text: "Audit in the background.",
+        attachments: [],
+      }),
+    );
+    for (const frame of [
+      makeSubagentTaskStartedFrame({
+        taskId: input.outerTaskId,
+        toolUseId: input.outerToolUseId,
+        uuid: `${input.uuidPrefix}01`,
+      }),
+      makeResultFrame({ uuid: `${input.uuidPrefix}02`, result: "Auditing in the background." }),
+    ]) {
+      yield* Queue.offer(harness.sdkMessages, frame);
+    }
+    yield* harness.until(() => harness.terminalEvents().length === 1);
+    const latestSubagent = (taskId: string) => {
+      const event = harness.events.findLast(
+        (candidate) =>
+          candidate.type === "subagent.updated" &&
+          candidate.subagent.nativeTaskRef?.nativeId === taskId,
+      );
+      return event?.type === "subagent.updated" ? event.subagent : undefined;
+    };
+    const nestedFrame = (frame: Record<string, unknown>, uuidSuffix: string) =>
+      claudeSdkFrame({
+        type: "system",
+        task_id: input.nestedTaskId,
+        uuid: `${input.uuidPrefix}${uuidSuffix}`,
+        session_id: WAKE_NATIVE_SESSION,
+        ...frame,
+      });
+    // The owner launches the nested subagent while the root is idle.
+    for (const frame of [
+      claudeSdkFrame({
+        type: "assistant",
+        message: {
+          model: "claude-sonnet-4-6",
+          id: `msg_${input.key}_launch`,
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: input.nestedToolUseId,
+              name: "Agent",
+              input: {
+                description: "Nested check",
+                prompt: "Reply with NESTED_OK",
+                ...(input.nestedBackgrounded ? { run_in_background: true } : {}),
+              },
+            },
+          ],
+        },
+        parent_tool_use_id: input.outerToolUseId,
+        uuid: `${input.uuidPrefix}03`,
+        session_id: WAKE_NATIVE_SESSION,
+      }),
+      nestedFrame(
+        {
+          subtype: "task_started",
+          tool_use_id: input.nestedToolUseId,
+          parent_task_id: input.outerTaskId,
+          description: "Nested check",
+          subagent_type: "general-purpose",
+          is_backgrounded: input.nestedBackgrounded,
+          spawn_depth: 2,
+          task_type: "local_agent",
+          prompt: "Reply with NESTED_OK",
+        },
+        "04",
+      ),
+    ]) {
+      yield* Queue.offer(harness.sdkMessages, frame);
+    }
+    yield* harness.until(() => {
+      const nested = latestSubagent(input.nestedTaskId);
+      return (
+        nested?.status === "running" &&
+        harness.events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.subagentId === nested.id,
+        )
+      );
+    });
+    assert.lengthOf(harness.continuationRequests, 0);
+    assertNestedUnderOwner(harness.events, input.nestedTaskId, input.outerTaskId);
+
+    yield* Queue.offer(
+      harness.sdkMessages,
+      nestedFrame(
+        {
+          subtype: "task_progress",
+          tool_use_id: input.nestedToolUseId,
+          description: "Running git status",
+          last_tool_name: "Bash",
+          usage: { total_tokens: 10, tool_uses: 1, duration_ms: 100 },
+        },
+        "05",
+      ),
+    );
+    yield* harness.until(
+      () => latestSubagent(input.nestedTaskId)?.progress === "Running git status",
+    );
+    assert.lengthOf(harness.continuationRequests, 0);
+    const endNested = Effect.fnUntraced(function* () {
+      for (const frame of [
+        nestedFrame({ subtype: "task_updated", patch: { status: "completed" } }, "06"),
+        makeSubagentNotificationFrame({
+          taskId: input.nestedTaskId,
+          toolUseId: input.nestedToolUseId,
+          summary: "NESTED_OK",
+          uuid: `${input.uuidPrefix}07`,
+        }),
+      ]) {
+        yield* Queue.offer(harness.sdkMessages, frame);
+      }
+      yield* harness.until(() => latestSubagent(input.nestedTaskId)?.status === "completed");
+    });
+    const endOuter = Effect.fnUntraced(function* () {
+      for (const frame of [
+        claudeSdkFrame({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: input.nestedToolUseId,
+                // A background launch returns at once; its end comes later.
+                content: input.nestedBackgrounded
+                  ? "Async agent launched successfully."
+                  : "NESTED_OK",
+              },
+            ],
+          },
+          parent_tool_use_id: input.outerToolUseId,
+          uuid: `${input.uuidPrefix}08`,
+          session_id: WAKE_NATIVE_SESSION,
+        }),
+        ...makeSubagentAssistantFrames({
+          parentToolUseId: input.outerToolUseId,
+          uuid: `${input.uuidPrefix}09`,
+          text: "OUTER_DONE",
+        }),
+      ]) {
+        yield* Queue.offer(harness.sdkMessages, frame);
+      }
+      yield* harness.until(() =>
+        harness.events.some(
+          (event) => event.type === "message.updated" && event.message.text === "OUTER_DONE",
+        ),
+      );
+      assert.lengthOf(harness.continuationRequests, 0);
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeSubagentNotificationFrame({
+          taskId: input.outerTaskId,
+          toolUseId: input.outerToolUseId,
+          summary: "OUTER_DONE",
+          uuid: `${input.uuidPrefix}10`,
+        }),
+      );
+      yield* harness.until(() => harness.continuationRequests.length === 1);
+      assert.equal(harness.continuationRequests[0]?.detail, "OUTER_DONE");
+    });
+    const runWakeTurn = Effect.fnUntraced(function* () {
+      yield* Queue.offer(
+        harness.sdkMessages,
+        makeResultFrame({ uuid: `${input.uuidPrefix}11`, result: "The audit finished." }),
+      );
+      yield* harness.runtime.startTurn(
+        makeClaudeTestTurnInput({
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now,
+          attemptId: RunAttemptId.make(`attempt-claude-${input.key}-2`),
+          text: "Background task completed.",
+          attachments: [],
+          providerTurnOrdinal: 2,
+          messageCreatedBy: "agent",
+          messageCreationSource: "provider",
+        }),
+      );
+      yield* harness.until(() => harness.terminalEvents().length === 2);
+    });
+    const assertSettled = () => {
+      assert.equal(latestSubagent(input.outerTaskId)?.status, "completed");
+      assert.equal(latestSubagent(input.nestedTaskId)?.status, "completed");
+      const nestedRows = harness.events.filter(
+        (event) =>
+          event.type === "subagent.updated" &&
+          event.subagent.nativeTaskRef?.nativeId === input.nestedTaskId,
+      );
+      const firstCompleted = nestedRows.findIndex(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.isAtLeast(firstCompleted, 0);
+      assert.isTrue(
+        nestedRows
+          .slice(firstCompleted)
+          .every(
+            (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+          ),
+      );
+      assertNestedUnderOwner(harness.events, input.nestedTaskId, input.outerTaskId);
+      assert.isFalse(
+        harness.events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === input.nestedToolUseId,
+        ),
+      );
+    };
+    return { harness, latestSubagent, endNested, endOuter, runWakeTurn, assertSettled };
+  });
+
+  it.effect("shows a nested subagent live while the root turn is idle", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { harness, endNested, endOuter, runWakeTurn, assertSettled } =
+          yield* idleNestedHarness({
+            key: "live-nested",
+            outerTaskId: "task-live-outer",
+            outerToolUseId: "toolu-live-outer",
+            nestedTaskId: "task-live-nested",
+            nestedToolUseId: "toolu-live-nested",
+            nestedBackgrounded: false,
+            uuidPrefix: "00000000-0000-4000-8000-000000000c",
+          });
+        yield* endNested();
+        // The nested end reports to its owner, never to the idle root.
+        assert.lengthOf(harness.continuationRequests, 0);
+        yield* endOuter();
+        yield* runWakeTurn();
+        assert.lengthOf(harness.continuationRequests, 1);
+        assertSettled();
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("ends a background nested subagent that outlives its owner", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { harness, latestSubagent, endNested, endOuter, runWakeTurn, assertSettled } =
+          yield* idleNestedHarness({
+            key: "outliving-nested",
+            outerTaskId: "task-outliving-outer",
+            outerToolUseId: "toolu-outliving-outer",
+            nestedTaskId: "task-outliving-nested",
+            nestedToolUseId: "toolu-outliving-nested",
+            nestedBackgrounded: true,
+            uuidPrefix: "00000000-0000-4000-8000-000000000d",
+          });
+        // The owner returns and finishes while its background scout still
+        // runs, and the root's wake turn for the owner comes and goes.
+        yield* endOuter();
+        yield* runWakeTurn();
+        assert.equal(latestSubagent("task-outliving-outer")?.status, "completed");
+        assert.equal(latestSubagent("task-outliving-nested")?.status, "running");
+        yield* endNested();
+        assert.lengthOf(harness.continuationRequests, 1);
+        assertSettled();
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
@@ -8876,7 +9179,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ]) {
           yield* Queue.offer(harness.sdkMessages, frame);
         }
-        yield* awaitUntil(() => harness.terminalEvents().length === 1, "launch turn terminal");
+        yield* harness.until(() => harness.terminalEvents().length === 1);
 
         assertOnRootThread(harness.events, OUTER_TASK_ID, harness.threadId);
         assertOnRootThread(harness.events, NESTED_TASK_ID, harness.threadId);
@@ -8968,13 +9271,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ]) {
           yield* Queue.offer(harness.sdkMessages, frame);
         }
-        yield* awaitUntil(
-          () =>
-            harness.events.some(
-              (event) =>
-                event.type === "message.updated" && event.message.text === "Look once more",
-            ),
-          "resume prompt",
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) => event.type === "message.updated" && event.message.text === "Look once more",
+          ),
         );
         const { owner, nested } = assertNestedUnderOwner(
           harness.events,
@@ -9081,7 +9381,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ]) {
           yield* Queue.offer(harness.sdkMessages, frame);
         }
-        yield* awaitUntil(() => bashItems().length > 0, "nested Bash call");
+        yield* harness.until(() => bashItems().length > 0);
         const { nested } = assertNestedUnderOwner(harness.events, NESTED_TASK_ID, OUTER_TASK_ID);
         assert.equal(bashItems()[0]?.threadId, nested.subagent?.childThreadId);
 
@@ -9095,7 +9395,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             result: "Interrupted.",
           }),
         );
-        yield* awaitUntil(() => harness.terminalEvents().length === 1, "interrupted terminal");
+        yield* harness.until(() => harness.terminalEvents().length === 1);
         assert.equal(harness.terminalEvents()[0]?.status, "interrupted");
         assert.deepEqual(
           bashItems().map((item) => item.status),

@@ -7430,6 +7430,49 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           return true;
         });
 
+        // A subagent a still-running subagent launches while the root is idle
+        // shows live in its owner's thread. Claude reports its end to the
+        // owner, never to the root, so it neither waits for nor opens a wake.
+        const isLiveNestedSubagentStart = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          message: Extract<
+            SDKMessage,
+            { readonly type: "system"; readonly subtype: "task_started" }
+          >,
+        ) {
+          if (isClaudeNonSubagentTask(message) || (message.spawn_depth ?? 1) <= 1) {
+            return false;
+          }
+          const ownerToolUseId =
+            message.tool_use_id === undefined
+              ? undefined
+              : pendingSubagentLaunchesByToolUseId.get(message.tool_use_id)?.ownerToolUseId;
+          const ownerTaskId =
+            ownerToolUseId === undefined
+              ? undefined
+              : (yield* Ref.get(sessionSubagentTaskIdsByToolUseId)).get(ownerToolUseId);
+          const owner =
+            ownerTaskId === undefined
+              ? undefined
+              : (yield* Ref.get(sessionSubagentsByTaskId)).get(ownerTaskId);
+          const parentTaskId = text(field(message, "parent_task_id"));
+          if (
+            owner === undefined ||
+            owner.task.status !== "running" ||
+            owner.childThread === null ||
+            owner.task.workflow !== undefined ||
+            (parentTaskId !== undefined && parentTaskId !== ownerTaskId)
+          ) {
+            return false;
+          }
+          return !((yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? []).some(
+            (entry) =>
+              entry.type === "system" &&
+              entry.subtype === "task_started" &&
+              entry.task_id === ownerTaskId,
+          );
+        });
+
         const settledTurnForSubagentFrame = Effect.fnUntraced(function* (
           nativeThreadId: string,
           message: SDKMessage,
@@ -7437,6 +7480,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const settled = settledTurnByNativeThread.get(nativeThreadId);
           if (settled === undefined) {
             return null;
+          }
+          if (message.type === "system" && message.subtype === "task_started") {
+            return (yield* isLiveNestedSubagentStart(nativeThreadId, message)) ? settled : null;
           }
           const userResults = claudeToolResultBlocksFromUserMessage(message);
           if (
@@ -7613,15 +7659,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             // task_notification must buffer wake evidence while still tracked
             // on the roster; clearing first would drop the wake pin.
             if (message.type === "system" && message.subtype === "task_notification") {
-              yield* bufferWakeMessage({ nativeThreadId: liveQuery.nativeThreadId, message });
-              yield* applyBackgroundTaskRosterMessage({
-                nativeThreadId: liveQuery.nativeThreadId,
-                message,
-                activeContext: null,
-              });
-              // Record wake evidence first, while the child is still running.
-              const registered = (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id);
-              const settled = settledTurnByNativeThread.get(liveQuery.nativeThreadId);
               const hasBufferedStart =
                 (yield* Ref.get(wakeBuffers))
                   .get(liveQuery.nativeThreadId)
@@ -7631,6 +7668,29 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                       entry.subtype === "task_started" &&
                       entry.task_id === message.task_id,
                   ) ?? false;
+              const settled = settledTurnByNativeThread.get(liveQuery.nativeThreadId);
+              const registeredBefore = (yield* Ref.get(sessionSubagentsByTaskId)).get(
+                message.task_id,
+              );
+              // A nested subagent shown live in its owner's thread ends live
+              // too; it is no wake evidence, so the buffer never replays it.
+              const endsNestedLive =
+                settled !== undefined &&
+                !hasBufferedStart &&
+                registeredBefore?.ownerChildThreadId != null &&
+                registeredBefore.task.status === "running" &&
+                registeredBefore.task.workflow === undefined &&
+                (yield* isNestedSubagentTask(message.task_id));
+              if (!endsNestedLive) {
+                yield* bufferWakeMessage({ nativeThreadId: liveQuery.nativeThreadId, message });
+              }
+              yield* applyBackgroundTaskRosterMessage({
+                nativeThreadId: liveQuery.nativeThreadId,
+                message,
+                activeContext: null,
+              });
+              // Record wake evidence first, while the child is still running.
+              const registered = (yield* Ref.get(sessionSubagentsByTaskId)).get(message.task_id);
               const canApplyOutcome =
                 subagentStopOutcomes.has(message.task_id) ||
                 (!hasBufferedStart && registered?.task.workflow === undefined);
