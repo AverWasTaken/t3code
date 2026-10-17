@@ -60,9 +60,12 @@ import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
-  // After root settlement, new children belong to the live run unless their coordinator still holds this run open.
+  // After root settlement, new children belong to the live run unless their coordinator,
+  // or the owner of a nested subagent, still holds this run open.
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
+  // Child threads of this run's non-workflow subagents that are still working.
+  readonly runningSubagentThreadIds: ReadonlySet<ThreadId>;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurns: ReadonlyMap<ProviderTurnId, ProviderThreadId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
@@ -345,6 +348,7 @@ export function makeProviderEventRoutingState(input: {
     ownedThreadIds: new Set([input.identity.threadId, ...(input.relatedThreadIds ?? [])]),
     rootTurnEnded: false,
     workflowMemberParents: new Map(),
+    runningSubagentThreadIds: new Set(),
     ownedProviderThreadIds: new Set([
       input.identity.providerThreadId,
       ...(input.relatedProviderThreadIds ?? []),
@@ -358,6 +362,33 @@ export function makeProviderEventRoutingState(input: {
     ),
     rootProviderTurnId: input.providerTurnId,
   };
+}
+
+// A non-workflow subagent this run still runs keeps following what it starts
+// after the root turn ends; a workflow coordinator enrolls its members instead.
+function trackRunningSubagentThread(
+  state: ProviderEventRoutingState,
+  subagent: OrchestrationV2Subagent,
+  runsHere: boolean,
+): ProviderEventRoutingState {
+  if (subagent.childThreadId === null) {
+    return state;
+  }
+  const running =
+    runsHere &&
+    subagent.workflow === undefined &&
+    subagent.origin === "provider_native" &&
+    isOrchestrationV2WorkActive(subagent.status);
+  if (running === state.runningSubagentThreadIds.has(subagent.childThreadId)) {
+    return state;
+  }
+  const runningSubagentThreadIds = new Set(state.runningSubagentThreadIds);
+  if (running) {
+    runningSubagentThreadIds.add(subagent.childThreadId);
+  } else {
+    runningSubagentThreadIds.delete(subagent.childThreadId);
+  }
+  return { ...state, runningSubagentThreadIds };
 }
 
 export function routeProviderEvent(
@@ -395,6 +426,7 @@ export function routeProviderEvent(
         event.appThread.lineage.parentThreadId !== null &&
         ownsThread(event.appThread.lineage.parentThreadId) &&
         (!state.rootTurnEnded ||
+          state.runningSubagentThreadIds.has(event.appThread.lineage.parentThreadId) ||
           state.workflowMemberParents.get(event.appThread.id) ===
             event.appThread.lineage.parentThreadId);
       if (!isOwnedSubagent) {
@@ -458,21 +490,26 @@ export function routeProviderEvent(
       }
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
       const coordinator = event.subagent;
+      const isNestedInOwnedThread =
+        coordinator.runId === null && ownsChildThread(coordinator.threadId);
+      const runsHere = ownsRun(coordinator.runId) || isNestedInOwnedThread;
+      const tracked = trackRunningSubagentThread(state, coordinator, runsHere);
       // Resumes reattribute child threads to the live run, which may not have observed their creation.
-      // A runless nested subagent follows the owned thread it lives in.
+      // A runless nested subagent follows the owned thread it lives in, even after the root turn
+      // ended while its owner still runs here.
       const adopted =
-        (ownsRun(coordinator.runId) ||
-          (coordinator.runId === null && ownsChildThread(coordinator.threadId))) &&
-        !state.rootTurnEnded &&
+        runsHere &&
+        (!state.rootTurnEnded ||
+          (isNestedInOwnedThread && state.runningSubagentThreadIds.has(coordinator.threadId))) &&
         isOrchestrationV2WorkActive(coordinator.status) &&
         coordinator.origin === "provider_native" &&
         coordinator.childThreadId !== null &&
         !ownsThread(coordinator.childThreadId)
           ? {
-              ...state,
+              ...tracked,
               ownedThreadIds: new Set([...state.ownedThreadIds, coordinator.childThreadId]),
             }
-          : state;
+          : tracked;
       if (
         !ownsRun(coordinator.runId) ||
         coordinator.workflow === undefined ||
