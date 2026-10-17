@@ -493,7 +493,24 @@ jobs:
             | gh api "repos/${GITHUB_REPOSITORY}/git/trees" --input - --jq .sha)"
           commit_sha="$(jq -n --arg tree "$tree_sha" --arg message "Fork nightly ${VERSION}" '{tree: $tree, parents: [], message: $message}' \
             | gh api "repos/${GITHUB_REPOSITORY}/git/commits" --input - --jq .sha)"
-          gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="$commit_sha" --jq .ref
+          # A re-run of this job reuses the run number, so the tag may exist
+          # from a failed attempt. A published release on it means this
+          # version is done; a draft (left by an interrupted upload) or a bare
+          # tag is replaced.
+          existing="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [[ "$existing" == "false" ]]; then
+            echo "::error::Release ${TAG} is already published. Start a new run instead of re-running this one."
+            exit 1
+          elif [[ "$existing" == "true" ]]; then
+            echo "Deleting draft release ${TAG} left by an earlier attempt."
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --silent 2>/dev/null; then
+            echo "Moving existing tag ${TAG} to a fresh commit."
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" -f sha="$commit_sha" -F force=true --jq .ref
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="$commit_sha" --jq .ref
+          fi
 
           gh release create "$TAG" release-publish/* \
             --repo "$GITHUB_REPOSITORY" \

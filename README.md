@@ -27,7 +27,9 @@ Once a day (09:17 UTC) and on manual dispatch, `fork-nightly.yml`:
    source, so GitHub lists releases in build order.
 
 Installed fork builds check this repository (not upstream) for updates, because
-the build sets `T3CODE_DESKTOP_UPDATE_REPOSITORY` to this repository.
+the build sets `T3CODE_DESKTOP_UPDATE_REPOSITORY` to this repository. A copy
+installed from upstream keeps updating from upstream; install one fork `.exe`
+from the Releases page by hand once to switch it over.
 
 ## Differences from upstream nightlies
 
@@ -41,14 +43,18 @@ the build sets `T3CODE_DESKTOP_UPDATE_REPOSITORY` to this repository.
   variables `T3CODE_CLERK_PUBLISHABLE_KEY`, `T3CODE_CLERK_JWT_TEMPLATE`,
   `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID`, and `T3CODE_RELAY_URL` are set.
   Relay client tracing is never configured.
+- In-app "release notes" links still point at `pingdotgg/t3code` releases, so
+  they 404 for fork versions.
 
 ## Changing the patches
 
-Commit to the patch branch (rebased on, or merged with, upstream `main`) and
-push it. The next scheduled run picks it up, or run the workflow by hand:
+Commit to the patch branch and push it. Keep it rebased on upstream `main`:
+merge commits are skipped, so conflict fixes made in a merge from upstream are
+lost. The next scheduled run picks it up, or run the workflow by hand:
 
 ```sh
 gh workflow run fork-nightly.yml --repo AverWasTaken/t3code -f force=true
 ```
 
-To build a different branch: `-f patch_branch=<branch>`.
+To build a different branch: `-f patch_branch=<branch>`. That build is
+published like any other, so installed fork builds update to it too.
