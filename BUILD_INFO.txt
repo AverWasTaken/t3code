@@ -1,0 +1,6 @@
+version=0.1.1-nightly.20261017.1
+upstream=pingdotgg/t3code@51f7382aff301e774f52ce10de1a49b5ff9c5589
+patch_branch=fix/nested-subagents
+patch_sha=51f7382aff301e774f52ce10de1a49b5ff9c5589
+patch_commits=
+run=https://github.com/AverWasTaken/t3code/actions/runs/38987209160
