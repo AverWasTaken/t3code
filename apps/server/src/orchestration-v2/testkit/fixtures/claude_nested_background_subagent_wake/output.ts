@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadProjection, ProviderReplayTranscript } from "@t3tools/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -30,24 +30,35 @@ export function assertClaudeNestedBackgroundSubagentWakeOutput(
   assertSemanticProjectionIntegrity(projection);
   assertNoExtraAppRunsForProviderChildren({ projection, expectedAppRuns: 2 });
 
-  const byTask = (taskId: string) => {
-    const subagent = projection.subagents.find((agent) => agent.nativeTaskRef?.nativeId === taskId);
+  const byTask = (owner: OrchestrationV2ThreadProjection, taskId: string) => {
+    const subagent = owner.subagents.find((agent) => agent.nativeTaskRef?.nativeId === taskId);
     assert.isDefined(subagent, `missing subagent for task ${taskId}`);
     assert.equal(subagent.status, "completed");
     return subagent;
   };
-  const child = byTask(CHILD_TASK_ID);
-  const grandchild = byTask(GRANDCHILD_TASK_ID);
+  const child = byTask(projection, CHILD_TASK_ID);
   assert.equal(child.parentNodeId, projection.runs[0]?.rootNodeId);
-  assert.equal(grandchild.parentNodeId, child.id, "the grandchild hangs off the child");
+  if (child.childThreadId === null) {
+    throw new Error("The child subagent is missing its child thread.");
+  }
+  const childThread = result.projections.get(child.childThreadId);
+  assert.isDefined(childThread);
+  const grandchild = byTask(childThread, GRANDCHILD_TASK_ID);
+  assert.equal(
+    grandchild.threadId,
+    child.childThreadId,
+    "the grandchild lives in the child's thread",
+  );
+  assert.equal(
+    grandchild.parentNodeId,
+    childThread.nodes.find((node) => node.kind === "root_turn")?.id,
+    "the grandchild hangs off the child",
+  );
 
   const wakeMessage = projection.messages.find(
     (message) => message.id === projection.runs[1]?.userMessageId,
   );
   assert.equal(wakeMessage?.text, "CHILD_DONE", "the child's end opens the wake");
-  if (child.childThreadId === null) {
-    throw new Error("The child subagent is missing its child thread.");
-  }
   assert.deepEqual(backgroundNotifications(projection), [
     {
       summary: `Subagent "${child.title}" finished`,

@@ -1,5 +1,5 @@
 import { assert } from "@effect/vitest";
-import type { ProviderReplayTranscript } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadProjection, ProviderReplayTranscript } from "@t3tools/contracts";
 
 import type { OrchestratorV2ScenarioResult } from "../../OrchestratorScenario.ts";
 import {
@@ -27,27 +27,48 @@ export function assertClaudeNestedSubagentModelOutput(
 
   const rootNodeId = projection.runs[0]?.rootNodeId;
   assert.isDefined(rootNodeId);
-  const byTask = (taskId: string) => {
-    const subagent = projection.subagents.find((agent) => agent.nativeTaskRef?.nativeId === taskId);
+  const byTask = (owner: OrchestrationV2ThreadProjection, taskId: string) => {
+    const subagent = owner.subagents.find((agent) => agent.nativeTaskRef?.nativeId === taskId);
     assert.isDefined(subagent, `missing subagent for task ${taskId}`);
     assert.equal(subagent.status, "completed");
     return subagent;
   };
-  const outer = byTask(OUTER_TASK_ID);
-  const nested = byTask(NESTED_TASK_ID);
+  const outer = byTask(projection, OUTER_TASK_ID);
+  if (outer.childThreadId === null) {
+    throw new Error("outer subagent is missing its child thread");
+  }
+  const outerChild = result.projections.get(outer.childThreadId);
+  assert.isDefined(outerChild);
+  assert.isUndefined(
+    projection.subagents.find((agent) => agent.nativeTaskRef?.nativeId === NESTED_TASK_ID),
+    "a nested subagent is not listed on the root thread",
+  );
+  const nested = byTask(outerChild, NESTED_TASK_ID);
 
   assert.equal(outer.parentNodeId, rootNodeId);
   assert.equal(outer.model, SUBAGENT_MODEL);
 
-  assert.equal(nested.parentNodeId, outer.id, "a nested subagent hangs off its owner");
+  const outerChildRoot = outerChild.nodes.find((node) => node.kind === "root_turn");
+  assert.isDefined(outerChildRoot);
+  assert.equal(
+    nested.threadId,
+    outer.childThreadId,
+    "a nested subagent lives in its owner's thread",
+  );
+  assert.isNull(nested.runId);
+  assert.equal(nested.parentNodeId, outerChildRoot.id, "a nested subagent hangs off its owner");
   assert.equal(nested.model, SUBAGENT_MODEL, "a nested subagent runs on its owner's model");
   const subagentSelection = { instanceId: outer.providerInstanceId, model: SUBAGENT_MODEL };
   assert.deepEqual(outer.modelSelection, subagentSelection);
   assert.deepEqual(nested.modelSelection, subagentSelection);
-  const nestedNode = projection.nodes.find((node) => node.id === nested.id);
+  const nestedNode = outerChild.nodes.find((node) => node.id === nested.id);
   assert.isDefined(nestedNode);
-  assert.equal(nestedNode.parentNodeId, outer.id);
-  assert.equal(nestedNode.rootNodeId, rootNodeId);
+  assert.equal(nestedNode.parentNodeId, outerChildRoot.id);
+  assert.equal(nestedNode.rootNodeId, outerChildRoot.id);
+  const nestedItem = outerChild.turnItems.find(
+    (item) => item.type === "subagent" && item.subagentId === nested.id,
+  );
+  assert.isDefined(nestedItem, "the owner's thread shows the nested subagent");
   assert.include(nested.result ?? "", "NESTED_LEAF_OK");
 
   if (nested.childThreadId === null) {
@@ -56,4 +77,5 @@ export function assertClaudeNestedSubagentModelOutput(
   const nestedChild = result.projections.get(nested.childThreadId);
   assert.isDefined(nestedChild);
   assert.equal(nestedChild.thread.modelSelection.model, SUBAGENT_MODEL);
+  assert.equal(nestedChild.thread.lineage.parentThreadId, outer.childThreadId);
 }

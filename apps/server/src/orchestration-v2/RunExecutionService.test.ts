@@ -455,6 +455,67 @@ it("moves a child thread to the run that shows its subagent now", () => {
   );
 });
 
+it("adopts a runless nested subagent's thread only from an owned child thread", () => {
+  const threadId = ThreadId.make("thread:nested-resume");
+  const identity: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:nested-resume:2"),
+    attemptId: RunAttemptId.make("attempt:nested-resume:2"),
+    providerThreadId: ProviderThreadId.make("provider-thread:nested-resume"),
+  };
+  const workerThread = ThreadId.make("thread:nested-resume:worker");
+  const scoutThread = ThreadId.make("thread:nested-resume:scout");
+  const strayThread = ThreadId.make("thread:nested-resume:stray");
+  // The worker completed in an earlier run, so this run relates its thread.
+  const initial = RunExecutionService.makeProviderEventRoutingState({
+    identity,
+    providerTurnId: ProviderTurnId.make("provider-turn:nested-resume:2"),
+    relatedThreadIds: [workerThread],
+  });
+  const scout = (ownerThread: ThreadId, childThreadId: ThreadId) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: NodeId.make(`node:nested-resume:${childThreadId}`),
+        threadId: ownerThread,
+        runId: null,
+        parentNodeId: NodeId.make("node:nested-resume:worker-root"),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        providerThreadId: null,
+        childThreadId,
+        nativeTaskRef: null,
+        prompt: "Look again",
+        title: "Scout",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: DateTime.makeUnsafe(0),
+      },
+    }) satisfies ProviderAdapter.ProviderAdapterV2Event;
+
+  const [reopenAccepted, afterReopen] = RunExecutionService.routeProviderEvent(
+    scout(workerThread, scoutThread),
+    identity,
+    initial,
+  );
+  assert.isTrue(reopenAccepted);
+  assert.isTrue(afterReopen.ownedThreadIds.has(scoutThread));
+
+  const [strayAccepted, afterStray] = RunExecutionService.routeProviderEvent(
+    scout(ThreadId.make("thread:nested-resume:unowned"), strayThread),
+    identity,
+    initial,
+  );
+  assert.isFalse(strayAccepted);
+  assert.isFalse(afterStray.ownedThreadIds.has(strayThread));
+});
+
 it("does not route a superseded attempt through a reused provider thread", () => {
   const threadId = ThreadId.make("thread:shared-runtime:restart");
   const providerThreadId = ProviderThreadId.make("provider-thread:shared-runtime:restart");
