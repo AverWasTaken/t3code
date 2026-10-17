@@ -459,8 +459,10 @@ export function routeProviderEvent(
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
       const coordinator = event.subagent;
       // Resumes reattribute child threads to the live run, which may not have observed their creation.
+      // A runless nested subagent follows the owned thread it lives in.
       const adopted =
-        ownsRun(coordinator.runId) &&
+        (ownsRun(coordinator.runId) ||
+          (coordinator.runId === null && ownsChildThread(coordinator.threadId))) &&
         !state.rootTurnEnded &&
         isOrchestrationV2WorkActive(coordinator.status) &&
         coordinator.origin === "provider_native" &&
