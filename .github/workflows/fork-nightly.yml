@@ -1,0 +1,508 @@
+name: Fork nightly (Windows x64)
+
+# Builds upstream pingdotgg/t3code main + this fork's patch branch as an
+# unsigned Windows x64 nightly and publishes it as a prerelease on this repo,
+# so an installed fork build updates from here. See README.md.
+#
+# The toolchain and packaging steps mirror upstream's release.yml (build_bundle
+# job) and release-desktop.yml (Windows x64 job). Nothing is ever pushed back
+# to a branch: the patched source only exists inside the runners.
+
+on:
+  schedule:
+    # Once a day, off the hour.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      patch_branch:
+        description: "Fork branch whose commits (since its merge-base with upstream main) are cherry-picked onto upstream main"
+        required: false
+        default: fix/nested-subagents
+        type: string
+      force:
+        description: "Build and publish even if upstream main and the patch branch are unchanged since the last release"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: fork-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: pingdotgg/t3code
+  UPSTREAM_BRANCH: main
+  PATCH_BRANCH: ${{ inputs.patch_branch || 'fix/nested-subagents' }}
+  # Public T3 Connect build constants. Upstream reads them from its production
+  # environment; here they come from optional repository variables. When unset
+  # the app builds fine with T3 Connect (relay/Clerk sign-in) disabled.
+  T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+  T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+  T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+  T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+
+jobs:
+  # Resolves what to build and whether it is new. Cheap; runs every day.
+  prepare:
+    name: Resolve upstream + patches
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      upstream_sha: ${{ steps.resolve.outputs.upstream_sha }}
+      patch_sha: ${{ steps.resolve.outputs.patch_sha }}
+      patch_commits: ${{ steps.resolve.outputs.patch_commits }}
+      key: ${{ steps.resolve.outputs.key }}
+      build: ${{ steps.resolve.outputs.build }}
+      tree: ${{ steps.apply.outputs.tree }}
+      nightly_date: ${{ steps.resolve.outputs.nightly_date }}
+    steps:
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity. Re-enabling the (already enabled) workflow through the API
+      # on every run resets that, without commits. Runs first and never fails
+      # the job.
+      - name: Keep scheduled workflow enabled
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/fork-nightly.yml/enable"
+
+      - id: resolve
+        name: Resolve upstream and patch commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          git init -q src
+          cd src
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git remote add fork "https://github.com/${GITHUB_REPOSITORY}.git"
+          # Commits and trees only; blobs are fetched on demand.
+          git fetch -q --filter=blob:none --no-tags upstream "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          if ! git fetch -q --filter=blob:none --no-tags fork "+refs/heads/${PATCH_BRANCH}:refs/remotes/fork/patch"; then
+            echo "::error::Patch branch '${PATCH_BRANCH}' does not exist on ${GITHUB_REPOSITORY}."
+            echo "### Fork nightly failed: patch branch \`${PATCH_BRANCH}\` not found on ${GITHUB_REPOSITORY}" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          upstream_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_BRANCH}")"
+          patch_sha="$(git rev-parse refs/remotes/fork/patch)"
+          base="$(git merge-base "$upstream_sha" "$patch_sha")"
+          # Patch commits: everything on the patch branch since it forked from
+          # upstream, oldest first. Merge commits (e.g. upstream merged into
+          # the patch branch) carry no patch of their own and are skipped.
+          patch_commits="$(git rev-list --reverse --no-merges "${base}..${patch_sha}" | tr '\n' ' ' | sed 's/ $//')"
+          key="upstream=${upstream_sha} patch=${patch_sha}"
+
+          echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
+          echo "patch_sha=$patch_sha" >> "$GITHUB_OUTPUT"
+          echo "patch_commits=$patch_commits" >> "$GITHUB_OUTPUT"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          # Fixed once per run, so re-running a later job keeps the same version.
+          echo "nightly_date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+          latest_body="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=1" --jq '.[0].body // ""' || true)"
+          build=true
+          if [[ "$latest_body" == *"<!-- fork-nightly-key: ${key} -->"* ]]; then
+            if [[ "$FORCE" == "true" ]]; then
+              echo "Latest release already has ${key}; building anyway (force)."
+            else
+              build=false
+              echo "Latest release already has ${key}; nothing to do."
+              echo "### Fork nightly skipped: upstream \`${upstream_sha:0:12}\` + patch \`${patch_sha:0:12}\` already released" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "Upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}: $upstream_sha"
+          echo "Patch ${PATCH_BRANCH}: $patch_sha (merge-base $base)"
+          echo "Patch commits: ${patch_commits:-<none>}"
+
+      # Applies the patches once here so a conflict fails fast, before any
+      # build, with the conflicting commit and files in the job summary.
+      - id: apply
+        name: Apply patch commits onto upstream
+        if: steps.resolve.outputs.build == 'true'
+        working-directory: src
+        env:
+          UPSTREAM_SHA: ${{ steps.resolve.outputs.upstream_sha }}
+          PATCH_COMMITS: ${{ steps.resolve.outputs.patch_commits }}
+        run: |
+          set -euo pipefail
+          git config user.name "fork-nightly"
+          git config user.email "fork-nightly@users.noreply.github.com"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c advice.detachedHead=false checkout -q --detach "$UPSTREAM_SHA"
+          for commit in $PATCH_COMMITS; do
+            subject="$(git log -1 --format=%s "$commit")"
+            echo "Cherry-picking $commit $subject"
+            if ! git cherry-pick --allow-empty --empty=drop "$commit"; then
+              conflicts="$(git diff --name-only --diff-filter=U || true)"
+              echo "::error::Patch commit ${commit} (${subject}) does not apply cleanly onto ${UPSTREAM_REPO}@${UPSTREAM_SHA}. Rebase ${PATCH_BRANCH} onto upstream main. The previous fork release is unchanged."
+              {
+                echo "### Fork nightly failed: patch conflict"
+                echo
+                echo "Commit \`${commit}\` (${subject}) from \`${PATCH_BRANCH}\` does not apply onto upstream \`${UPSTREAM_SHA}\`."
+                echo
+                echo "Conflicting files:"
+                echo '```'
+                echo "${conflicts:-<unknown>}"
+                echo '```'
+                echo "Rebase \`${PATCH_BRANCH}\` onto upstream main and push it. The previous fork release stays in place."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+          git log --oneline -n "$(( $(echo $PATCH_COMMITS | wc -w) + 1 ))"
+
+  # Same as upstream release.yml build_bundle: the platform-independent JS
+  # (server bundle, web client, Electron main) built once on Linux.
+  build_bundle:
+    name: Build JS bundle
+    needs: [prepare]
+    if: needs.prepare.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      name: ${{ steps.version.outputs.name }}
+    steps:
+      - name: Checkout upstream and apply patches
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          PATCH_SHA: ${{ needs.prepare.outputs.patch_sha }}
+          PATCH_COMMITS: ${{ needs.prepare.outputs.patch_commits }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init -q .
+          git config user.name "fork-nightly"
+          git config user.email "fork-nightly@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git remote add fork "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --filter=blob:none --no-tags upstream "$UPSTREAM_SHA"
+          git fetch -q --filter=blob:none --no-tags fork "$PATCH_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 -c advice.detachedHead=false checkout -q --detach "$UPSTREAM_SHA"
+          for commit in $PATCH_COMMITS; do
+            git cherry-pick --allow-empty --empty=drop "$commit"
+          done
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          if [[ "$tree" != "$EXPECTED_TREE" ]]; then
+            echo "::error::Patched tree $tree differs from the one resolved in prepare ($EXPECTED_TREE)."
+            exit 1
+          fi
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        env:
+          pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      # Share only the verification results, not the large registry metadata cache.
+      - name: Upload dependency verification
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-dependency-verification
+          path: ${{ runner.temp }}/pnpm-metadata/lockfile-verified.jsonl
+
+      # Upstream's own nightly versioning (scripts/resolve-nightly-release.ts):
+      # <next patch of apps/desktop version>-nightly.<UTC run date>.<run number>.
+      # The run number is this workflow's, so it only ever grows across fork runs.
+      - id: version
+        name: Resolve nightly version
+        shell: bash
+        env:
+          NIGHTLY_DATE: ${{ needs.prepare.outputs.nightly_date }}
+          NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
+          node scripts/resolve-nightly-release.ts \
+            --date "$nightly_date" \
+            --run-number "$NIGHTLY_RUN_NUMBER" \
+            --sha "$UPSTREAM_SHA" \
+            --github-output
+          cat "$GITHUB_OUTPUT"
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ steps.version.outputs.version }}"
+
+      # @t3tools/desktop#build compiles the Linux browser secret helper on a
+      # Linux host before packing, and that needs libsecret headers.
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        run: vp run build:desktop
+
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  # Same as upstream release-desktop.yml for Windows x64, minus signing and the
+  # bundled WSL runtime, plus publishing.
+  desktop_win_x64:
+    name: Desktop Windows x64
+    needs: [prepare, build_bundle]
+    if: needs.prepare.outputs.build == 'true' && needs.build_bundle.result == 'success'
+    runs-on: windows-2025
+    timeout-minutes: 70
+    env:
+      VERSION: ${{ needs.build_bundle.outputs.version }}
+      TAG: ${{ needs.build_bundle.outputs.tag }}
+    steps:
+      - name: Checkout upstream and apply patches
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          PATCH_SHA: ${{ needs.prepare.outputs.patch_sha }}
+          PATCH_COMMITS: ${{ needs.prepare.outputs.patch_commits }}
+          EXPECTED_TREE: ${{ needs.prepare.outputs.tree }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init -q .
+          git config user.name "fork-nightly"
+          git config user.email "fork-nightly@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git remote add fork "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --filter=blob:none --no-tags upstream "$UPSTREAM_SHA"
+          git fetch -q --filter=blob:none --no-tags fork "$PATCH_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 -c advice.detachedHead=false checkout -q --detach "$UPSTREAM_SHA"
+          for commit in $PATCH_COMMITS; do
+            git cherry-pick --allow-empty --empty=drop "$commit"
+          done
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          if [[ "$tree" != "$EXPECTED_TREE" ]]; then
+            echo "::error::Patched tree $tree differs from the one resolved in prepare ($EXPECTED_TREE)."
+            exit 1
+          fi
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: false
+          run-install: false
+
+      - name: Download dependency verification
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-dependency-verification
+          path: ${{ runner.temp }}/pnpm-metadata
+
+      - name: Install desktop dependencies
+        env:
+          pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: native/resource-monitor/target/x86_64-pc-windows-msvc/release/t3-resource-monitor.exe
+          key: resource-monitor-x86_64-pc-windows-msvc-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Align package versions to release version
+        run: node scripts/update-release-package-versions.ts "${{ env.VERSION }}"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      # Only the resource monitor build needs these libraries.
+      - name: Install Spectre-mitigated MSVC libs
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      # Unsigned (no --signed) and without --wsl-runtime. With no signing,
+      # electron-builder writes no publisherName into app-update.yml, so
+      # electron-updater skips the installer signature check on updates.
+      - name: Build desktop artifact
+        shell: bash
+        env:
+          pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: ${{ steps.resource_monitor_cache.outputs.cache-hit == 'true' }}
+          T3CODE_DESKTOP_REUSE_LINUX_CAPTURE_HELPERS: "false"
+          # Feed the installed app updates from this fork, not upstream.
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          vp run dist:desktop:artifact \
+            --platform win \
+            --target nsis \
+            --arch x64 \
+            --build-version "$VERSION" \
+            --skip-build \
+            --verbose
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          shopt -s nullglob
+          for file in release/*.exe release/*.blockmap release/*.yml; do
+            # builder-debug.yml is electron-builder's config dump, not a feed.
+            [[ "$file" == */builder-debug.yml ]] && continue
+            cp "$file" release-publish/
+          done
+          ls -la release-publish
+
+      # Refuses to publish anything an installed fork build could not update
+      # from: wrong feed, a publisherName (unsigned installers would be
+      # rejected), or a manifest that does not describe the installer.
+      - name: Verify updater metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-publish
+          shopt -s nullglob
+          exes=(*.exe)
+          if [[ ${#exes[@]} -ne 1 ]]; then
+            echo "::error::Expected exactly one installer, found: ${exes[*]:-none}"
+            exit 1
+          fi
+          exe="${exes[0]}"
+          [[ -f "${exe}.blockmap" ]] || { echo "::error::Missing ${exe}.blockmap"; exit 1; }
+          [[ -f nightly.yml ]] || { echo "::error::Missing nightly.yml updater manifest"; ls; exit 1; }
+          cat nightly.yml
+
+          # Manifest must name this version and this installer with its sha512.
+          node -e '
+            const fs = require("fs"), crypto = require("crypto");
+            const [exe, version] = process.argv.slice(1);
+            const yml = fs.readFileSync("nightly.yml", "utf8");
+            const field = (k) => (yml.match(new RegExp("^" + k + ":\\s*(.+)$", "m")) || [])[1]?.trim().replace(/^["\x27]|["\x27]$/g, "");
+            const sha = crypto.createHash("sha512").update(fs.readFileSync(exe)).digest("base64");
+            const errors = [];
+            if (field("version") !== version) errors.push(`version ${field("version")} != ${version}`);
+            if (field("path") !== exe) errors.push(`path ${field("path")} != ${exe}`);
+            if (field("sha512") !== sha) errors.push(`sha512 ${field("sha512")} != ${sha}`);
+            if (!yml.includes(`url: ${exe}`)) errors.push(`files[].url does not list ${exe}`);
+            if (errors.length) { console.error("::error::nightly.yml mismatch: " + errors.join("; ")); process.exit(1); }
+            console.log("nightly.yml matches", exe);
+          ' "$exe" "$VERSION"
+
+          # app-update.yml inside the installer payload.
+          work="$RUNNER_TEMP/installer-inspect"
+          rm -rf "$work" && mkdir -p "$work"
+          7z x -y -o"$work/nsis" "$exe" '$PLUGINSDIR/app-64.7z' > /dev/null
+          7z x -y -o"$work/app" "$work/nsis/\$PLUGINSDIR/app-64.7z" resources/app-update.yml > /dev/null
+          app_update="$work/app/resources/app-update.yml"
+          echo "--- resources/app-update.yml"
+          cat "$app_update"
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          grep -Eq "^owner: ${owner}[[:space:]]*$" "$app_update" || { echo "::error::app-update.yml owner is not ${owner}"; exit 1; }
+          grep -Eq "^repo: ${repo}[[:space:]]*$" "$app_update" || { echo "::error::app-update.yml repo is not ${repo}"; exit 1; }
+          grep -Eq "^channel: nightly[[:space:]]*$" "$app_update" || { echo "::error::app-update.yml channel is not nightly"; exit 1; }
+          if grep -q "publisherName" "$app_update"; then
+            echo "::error::app-update.yml has publisherName; updates to unsigned builds would be rejected."
+            exit 1
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-win-x64
+          path: release-publish/*
+          if-no-files-found: error
+          retention-days: 7
+
+      # GitHub orders releases (and the releases.atom feed electron-updater
+      # reads) by the date of the tag's commit. The built source is never
+      # pushed, so each release gets its own tag commit: a fresh parentless
+      # commit holding only a BUILD_INFO.txt. Its date is now, so the newest
+      # release is always first in the feed, and it has no workflow files, so
+      # GITHUB_TOKEN may create it.
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_NAME: ${{ needs.build_bundle.outputs.name }}
+          UPSTREAM_SHA: ${{ needs.prepare.outputs.upstream_sha }}
+          PATCH_SHA: ${{ needs.prepare.outputs.patch_sha }}
+          PATCH_COMMITS: ${{ needs.prepare.outputs.patch_commits }}
+          KEY: ${{ needs.prepare.outputs.key }}
+        run: |
+          set -euo pipefail
+          patch_list="$(for c in $PATCH_COMMITS; do git log -1 --format='- [`%h`](https://github.com/'"${GITHUB_REPOSITORY}"'/commit/%H) %s' "$c"; done)"
+          {
+            echo "Unofficial fork build of T3 Code nightly: upstream \`${UPSTREAM_REPO}\` main plus the patch commits below. Windows x64 only, unsigned, no bundled WSL runtime."
+            echo
+            echo "- Version: \`${VERSION}\`"
+            echo "- Upstream: [\`${UPSTREAM_SHA:0:12}\`](https://github.com/${UPSTREAM_REPO}/commit/${UPSTREAM_SHA}) (${UPSTREAM_REPO}@${UPSTREAM_BRANCH})"
+            echo "- Patch branch: \`${PATCH_BRANCH}\` at [\`${PATCH_SHA:0:12}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${PATCH_SHA})"
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "Patch commits:"
+            echo "${patch_list:-- (none)}"
+            echo
+            echo "<!-- fork-nightly-key: ${KEY} -->"
+          } > "$RUNNER_TEMP/release-notes.md"
+
+          info="$(printf 'version=%s\nupstream=%s@%s\npatch_branch=%s\npatch_sha=%s\npatch_commits=%s\nrun=%s/%s/actions/runs/%s\n' \
+            "$VERSION" "$UPSTREAM_REPO" "$UPSTREAM_SHA" "$PATCH_BRANCH" "$PATCH_SHA" "$PATCH_COMMITS" \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          tree_sha="$(jq -n --arg content "$info" '{tree: [{path: "BUILD_INFO.txt", mode: "100644", type: "blob", content: $content}]}' \
+            | gh api "repos/${GITHUB_REPOSITORY}/git/trees" --input - --jq .sha)"
+          commit_sha="$(jq -n --arg tree "$tree_sha" --arg message "Fork nightly ${VERSION}" '{tree: $tree, parents: [], message: $message}' \
+            | gh api "repos/${GITHUB_REPOSITORY}/git/commits" --input - --jq .sha)"
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${TAG}" -f sha="$commit_sha" --jq .ref
+
+          gh release create "$TAG" release-publish/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --prerelease \
+            --latest=false \
+            --title "$RELEASE_NAME (fork)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          echo "### Published [${TAG}](${url})" >> "$GITHUB_STEP_SUMMARY"
+          echo "$url"
