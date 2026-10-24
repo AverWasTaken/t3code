@@ -1,5 +1,6 @@
 import { pipe } from "effect/Function";
 import * as DocumentText from "../../provider/DocumentText.ts";
+import { codexFileChangePatch } from "./fileChangePatch.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -3841,7 +3842,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               updatedAt,
               type: "file_change",
               fileName: firstChange.path,
-              diffStr: firstChange.diff,
+              ...(item.status === "completed"
+                ? { diffStr: codexFileChangePatch(item.changes) ?? firstChange.diff }
+                : {}),
               changes: item.changes.map((change) => {
                 const movePath = change.kind.type === "update" ? change.kind.move_path : undefined;
                 return movePath

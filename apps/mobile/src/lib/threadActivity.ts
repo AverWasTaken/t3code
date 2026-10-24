@@ -954,7 +954,8 @@ function groupAdjacentActivities(
       entry.activity.workEntry.questionAnswer !== undefined ||
       entry.activity.projectedItem.item.type === "compaction" ||
       entry.activity.projectedItem.item.type === "handoff" ||
-      entry.activity.projectedItem.item.type === "notification";
+      entry.activity.projectedItem.item.type === "notification" ||
+      entry.activity.projectedItem.item.type === "file_change";
     if (
       isStandaloneActivity ||
       entry.activity.prominent ||
@@ -1201,6 +1202,7 @@ function deriveThreadFeedRunFolds(
                   activity.prominent ||
                   activity.workEntry.questionAnswer !== undefined ||
                   activity.projectedItem.item.type === "notification" ||
+                  activity.projectedItem.item.type === "file_change" ||
                   activity.projectedItem.item.type === "handoff" ||
                   // A child still working outlives its settled launching run;
                   // its group stays visible while any member is live.
@@ -1928,6 +1930,7 @@ function appendActivityGroupRows(
   }
   const activities = entry.activities.filter(
     (activity) =>
+      activity.projectedItem.item.type === "file_change" ||
       threadFeedActivityIsVisible(activity) ||
       (isWorking && activity.lifecycleStatus === "inProgress" && activity.runId === activeRunId),
   );
@@ -1964,7 +1967,12 @@ function appendActivityGroupRows(
   for (const activity of activities) {
     const item = activity.projectedItem.item;
     const severeProviderError = item.type === "error" && item.status === "failed";
-    if (!activity.prominent && !severeProviderError && item.type !== "notification") {
+    if (
+      !activity.prominent &&
+      !severeProviderError &&
+      item.type !== "notification" &&
+      item.type !== "file_change"
+    ) {
       groupableRun.push(activity);
       continue;
     }

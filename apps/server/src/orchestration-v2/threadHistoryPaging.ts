@@ -186,7 +186,6 @@ function isThreadHistoryTurnStart(item: HistoryRow["item"]): boolean {
 export const DEFERRED_WORK_ITEM_TYPES = [
   "command_execution",
   "reasoning",
-  "file_change",
   "file_search",
   "web_search",
   "dynamic_tool",

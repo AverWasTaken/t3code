@@ -1689,6 +1689,9 @@ export const OrchestrationV2TurnItem = Schema.Union([
     additions: Schema.optional(NonNegativeInt),
     deletions: Schema.optional(NonNegativeInt),
     diffStr: Schema.optional(Schema.String),
+    /** Applied patch withheld from compact rows; fetch it with getTurnItem. */
+    diffOmitted: Schema.optional(Schema.Boolean),
+    diffTruncated: Schema.optional(Schema.Boolean),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
@@ -2535,6 +2538,9 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     additions: Schema.optional(NonNegativeInt),
     deletions: Schema.optional(NonNegativeInt),
     diffStr: Schema.optional(Schema.String),
+    /** Applied patch withheld from compact rows; fetch it with getTurnItem. */
+    diffOmitted: Schema.optional(Schema.Boolean),
+    diffTruncated: Schema.optional(Schema.Boolean),
     oldStr: Schema.optional(Schema.String),
     newStr: Schema.optional(Schema.String),
     changes: Schema.optional(Schema.Array(OrchestrationV2FileChangeDetail)),
