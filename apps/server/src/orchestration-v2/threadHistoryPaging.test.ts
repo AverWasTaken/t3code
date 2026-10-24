@@ -188,6 +188,21 @@ describe("threadHistoryPaging", () => {
     const deferredWork = deferWorkHistoryRows(work)[0]!.item.deferredWork!;
     expect(deferredWork.itemCount).toBe(151);
     expect(decodeThreadHistoryCursor(deferredWork.cursor).p).toBe(151);
+    const extra = makeRow(151);
+    const withEdit = [
+      ...work,
+      { ...extra, item: { ...extra.item, runId: RUN, runStatus: "completed" } },
+    ].map((row, index) =>
+      index === 75
+        ? { ...row, item: { ...row.item, type: "file_change" as const, fileName: "a.ts" } }
+        : row,
+    );
+    const deferredWithEdit = deferWorkHistoryRows(withEdit);
+    expect(deferredWithEdit[0]!.item.deferredWork!.itemCount).toBe(151);
+    expect(deferredWithEdit.map((row) => row.sourceItemId)).toEqual([
+      work[0]!.sourceItemId,
+      work[75]!.sourceItemId,
+    ]);
     const superseded = work.map((row) => ({
       ...row,
       item: { ...row.item, runStatus: "running", attemptId: "old", attemptStatus: "superseded" },

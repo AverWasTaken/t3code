@@ -76,6 +76,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { Tool } from "effect/ai";
 import { formatClaudeResumeCompactionQuestion } from "@t3tools/shared/claudeCompaction";
+import { INLINE_EDIT_AWAITING_REVIEW_TITLE } from "@t3tools/shared/inlineEdit";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { SpawnExecutableResolution } from "@t3tools/shared/shell";
@@ -11777,6 +11778,59 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       },
       diffStr: undefined,
     },
+    {
+      case: "a Write that overwrites a file without native hunks",
+      toolName: "Write",
+      toolInput: { file_path: "/workspace/notes.md", content: "after\n" },
+      toolUseResult: {
+        type: "update",
+        filePath: "/workspace/notes.md",
+        content: "after\n",
+        structuredPatch: [],
+        originalFile: "before\n",
+        userModified: false,
+      },
+      diffStr:
+        "--- /workspace/notes.md\n+++ /workspace/notes.md\n@@ -1,1 +1,1 @@\n-before\n+after\n",
+    },
+    {
+      case: "a NotebookEdit",
+      toolName: "NotebookEdit",
+      toolInput: { notebook_path: "/workspace/a.ipynb", new_source: "after" },
+      toolUseResult: {
+        notebook_path: "/workspace/a.ipynb",
+        original_file: "same\nbefore\n",
+        updated_file: "same\nafter\n",
+      },
+      diffStr:
+        "--- /workspace/a.ipynb\n+++ /workspace/a.ipynb\n@@ -1,2 +1,2 @@\n same\n-before\n+after\n",
+    },
+    {
+      case: "a NotebookEdit that reports an error",
+      toolName: "NotebookEdit",
+      toolInput: { notebook_path: "/workspace/a.ipynb", new_source: "after" },
+      toolUseResult: {
+        notebook_path: "/workspace/a.ipynb",
+        original_file: "before\n",
+        updated_file: "after\n",
+        error: "Edit failed",
+      },
+      diffStr: "Edit failed",
+    },
+    {
+      case: "an Edit staged for review",
+      toolName: "Edit",
+      toolInput: { file_path: "/workspace/a.ts", old_string: "old", new_string: "new" },
+      toolUseResult: {
+        filePath: "/workspace/a.ts",
+        staged: true,
+        structuredPatch: [
+          { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] },
+        ],
+      },
+      diffStr: undefined,
+      title: INLINE_EDIT_AWAITING_REVIEW_TITLE,
+    },
   ])("stores the diff panel patch for $case", (testCase) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -11826,7 +11880,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
                 {
                   type: "tool_result",
                   tool_use_id: toolUseId,
-                  content: `The file ${testCase.toolInput.file_path} has been updated successfully.`,
+                  content: "The file has been updated successfully.",
                 },
               ],
             },
@@ -11853,6 +11907,12 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             : undefined,
           { diffStr: testCase.diffStr },
         );
+        if ("title" in testCase) {
+          assert.equal(
+            fileChange?.type === "turn_item.updated" ? fileChange.turnItem.title : undefined,
+            testCase.title,
+          );
+        }
       }).pipe(
         Effect.provide(
           Layer.mergeAll(

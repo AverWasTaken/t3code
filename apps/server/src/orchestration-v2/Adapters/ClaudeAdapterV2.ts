@@ -1,4 +1,5 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
+import { INLINE_EDIT_AWAITING_REVIEW_TITLE } from "@t3tools/shared/inlineEdit";
 import {
   compactDynamicToolOutput,
   mcpToolResultOutput,
@@ -3353,6 +3354,7 @@ const decodeClaudeFileEditResult = Schema.decodeUnknownOption(
     type: Schema.optional(Schema.String),
     filePath: Schema.String,
     content: Schema.optional(Schema.String),
+    originalFile: Schema.optional(Schema.NullOr(Schema.String)),
     structuredPatch: Schema.mutable(
       Schema.Array(
         Schema.Struct({
@@ -3367,22 +3369,39 @@ const decodeClaudeFileEditResult = Schema.decodeUnknownOption(
   }),
 );
 
+const decodeClaudeNotebookEditResult = Schema.decodeUnknownOption(
+  Schema.Struct({
+    notebook_path: Schema.String,
+    original_file: Schema.String,
+    updated_file: Schema.String,
+    error: Schema.optional(Schema.NullOr(Schema.String)),
+  }),
+);
+
 function claudeFileChangeText(output: ClaudeNativeToolOutput): string {
-  const result =
-    output.type === "structured_tool_use_result"
-      ? Option.getOrUndefined(decodeClaudeFileEditResult(output.value))
-      : undefined;
+  const value = output.type === "structured_tool_use_result" ? output.value : undefined;
+  const notebook = Option.getOrUndefined(decodeClaudeNotebookEditResult(value));
+  if (notebook?.error?.trim()) return notebook.error;
+  if (notebook !== undefined) {
+    const path = notebook.notebook_path;
+    const patch = structuredPatch(path, path, notebook.original_file, notebook.updated_file);
+    return patch.hunks.length === 0 ? "" : formatPatch(patch, FILE_HEADERS_ONLY);
+  }
+  const result = Option.getOrUndefined(decodeClaudeFileEditResult(value));
   if (result === undefined) return claudeNativeToolOutputText(output);
+  const hasNoHunks = result.structuredPatch.length === 0 && result.content !== undefined;
   const patch =
-    result.structuredPatch.length === 0 && result.type === "create" && result.content !== undefined
-      ? structuredPatch("/dev/null", result.filePath, "", result.content)
-      : {
-          oldFileName: result.filePath,
-          newFileName: result.filePath,
-          oldHeader: undefined,
-          newHeader: undefined,
-          hunks: result.structuredPatch,
-        };
+    hasNoHunks && result.type === "create"
+      ? structuredPatch("/dev/null", result.filePath, "", result.content!)
+      : hasNoHunks && result.type === "update" && typeof result.originalFile === "string"
+        ? structuredPatch(result.filePath, result.filePath, result.originalFile, result.content!)
+        : {
+            oldFileName: result.filePath,
+            newFileName: result.filePath,
+            oldHeader: undefined,
+            newHeader: undefined,
+            hunks: result.structuredPatch,
+          };
   return patch.hunks.length === 0 ? "" : formatPatch(patch, FILE_HEADERS_ONLY);
 }
 
@@ -6186,7 +6205,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ...itemBase,
                     type: "file_change",
                     fileName: fileNameFromClaudeTool(input.toolName, input.toolInput),
-                    ...(outputText.length === 0 ? {} : { diffStr: outputText }),
+                    // A staged edit has not been applied, so its hunks are not the edit yet.
+                    ...(itemBase.status === "completed" &&
+                    typeof outputValue === "object" &&
+                    outputValue !== null &&
+                    Reflect.get(outputValue, "staged") === true
+                      ? { title: INLINE_EDIT_AWAITING_REVIEW_TITLE }
+                      : outputText.length === 0
+                        ? {}
+                        : { diffStr: outputText }),
                   }
                 : itemType === "web_search"
                   ? {

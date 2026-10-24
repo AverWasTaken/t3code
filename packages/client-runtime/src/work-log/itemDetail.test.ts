@@ -2,7 +2,13 @@ import { describe, expect, it } from "vite-plus/test";
 import { ThreadId, TurnItemId, type OrchestrationV2TurnItem } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { isJsonToolText, turnItemOutputImages, turnItemOutputText } from "./itemDetail.ts";
+import {
+  isJsonToolText,
+  turnItemNeedsDetailFetch,
+  turnItemDetailRevision,
+  turnItemOutputImages,
+  turnItemOutputText,
+} from "./itemDetail.ts";
 
 describe("isJsonToolText", () => {
   it.each([
@@ -23,7 +29,7 @@ describe("isJsonToolText", () => {
   });
 });
 
-function toolItem(output: unknown): OrchestrationV2TurnItem {
+function toolItem(output: unknown): Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> {
   return {
     id: TurnItemId.make("images"),
     threadId: ThreadId.make("thread"),
@@ -112,4 +118,21 @@ describe("tool image output parsing", () => {
       );
     },
   );
+});
+
+describe("file change detail fetching", () => {
+  it("fetches completed omitted patches once per final revision", () => {
+    const item: Extract<OrchestrationV2TurnItem, { type: "file_change" }> = {
+      ...toolItem(undefined),
+      type: "file_change",
+      fileName: "a",
+      diffOmitted: true,
+    };
+    expect(turnItemNeedsDetailFetch(item)).toBe(true);
+    expect(turnItemNeedsDetailFetch({ ...item, status: "running" })).toBe(false);
+    expect(turnItemNeedsDetailFetch({ ...item, status: "failed" })).toBe(false);
+    expect(turnItemNeedsDetailFetch({ ...item, diffOmitted: false, diffStr: "patch" })).toBe(false);
+    expect(turnItemDetailRevision({ ...item, status: "running" })).toBe("live");
+    expect(turnItemDetailRevision(item)).not.toBe("live");
+  });
 });

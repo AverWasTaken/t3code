@@ -50,19 +50,40 @@ function truncateDetail(
   return `${prefix}${TRUNCATION_MARKER}`;
 }
 
+type FileChangeItem = Extract<OrchestrationV2TurnItem, { type: "file_change" }>;
+
+// Patches use an explicit flag rather than appending non-patch text. This keeps
+// the byte cap exact and repeated storage/detail projection idempotent.
+function clipFileChangeBodies(item: FileChangeItem, maxBytes: number): FileChangeItem {
+  const clip = (value: string | undefined) => {
+    if (
+      value === undefined ||
+      (value.length <= maxBytes && Buffer.byteLength(value, "utf8") <= maxBytes)
+    )
+      return value;
+    return Buffer.from(value.slice(0, maxBytes), "utf8")
+      .subarray(0, maxBytes)
+      .toString("utf8")
+      .replace(/\uFFFD$/u, "");
+  };
+  const { diffStr, oldStr, newStr } = item;
+  const boundedDiff = clip(diffStr);
+  const boundedOld = clip(oldStr);
+  const boundedNew = clip(newStr);
+  return boundedDiff === diffStr && boundedOld === oldStr && boundedNew === newStr
+    ? item
+    : {
+        ...item,
+        ...(boundedDiff === undefined ? {} : { diffStr: boundedDiff }),
+        ...(boundedOld === undefined ? {} : { oldStr: boundedOld }),
+        ...(boundedNew === undefined ? {} : { newStr: boundedNew }),
+        diffTruncated: true,
+      };
+}
+
 /** Bound stored diffs to the client wire limit to avoid retaining invisible data in SQLite and heap. */
 export function boundFileChangeForStorage(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
-  if (item.type !== "file_change") return item;
-  const { diffStr, oldStr, newStr } = item;
-  const bounded = {
-    ...item,
-    ...(diffStr === undefined ? {} : { diffStr: truncateDetail(diffStr) }),
-    ...(oldStr === undefined ? {} : { oldStr: truncateDetail(oldStr) }),
-    ...(newStr === undefined ? {} : { newStr: truncateDetail(newStr) }),
-  };
-  return bounded.diffStr === diffStr && bounded.oldStr === oldStr && bounded.newStr === newStr
-    ? item
-    : bounded;
+  return item.type === "file_change" ? clipFileChangeBodies(item, MAX_DETAIL_STRING_BYTES) : item;
 }
 
 function summarizeDynamicValue(value: unknown): unknown {
@@ -180,7 +201,10 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       const { diffStr, oldStr: _old, newStr: _new, ...projected } = item;
       return item.status === "failed" && diffStr?.trim()
         ? { ...projected, diffStr: truncateDetail(diffStr) }
-        : projected;
+        : {
+            ...projected,
+            ...(item.status === "completed" && diffStr?.trim() ? { diffOmitted: true } : {}),
+          };
     }
     case "subagent":
       return {
@@ -261,19 +285,20 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
         result:
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };
-    case "file_change":
+    case "file_change": {
+      const {
+        diffOmitted: _omitted,
+        oldStr,
+        newStr,
+        ...detail
+      } = clipFileChangeBodies(item, MAX_ON_DEMAND_BYTES);
       return {
-        ...projectTurnItemForWire(item),
-        ...(item.diffStr === undefined
-          ? {}
-          : { diffStr: truncateDetail(item.diffStr, MAX_ON_DEMAND_BYTES) }),
-        ...(!item.diffStr?.trim() && item.oldStr !== undefined
-          ? { oldStr: truncateDetail(item.oldStr, MAX_ON_DEMAND_BYTES) }
-          : {}),
-        ...(!item.diffStr?.trim() && item.newStr !== undefined
-          ? { newStr: truncateDetail(item.newStr, MAX_ON_DEMAND_BYTES) }
-          : {}),
+        ...detail,
+        // Old and new contents only stand in for a missing patch.
+        ...(!detail.diffStr?.trim() && oldStr !== undefined ? { oldStr } : {}),
+        ...(!detail.diffStr?.trim() && newStr !== undefined ? { newStr } : {}),
       };
+    }
     case "handoff":
       return projectTurnItemForWire(item);
     default:

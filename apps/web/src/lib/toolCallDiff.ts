@@ -57,7 +57,10 @@ function recordedText(value: string | undefined) {
 }
 
 export function toolCallDiff(
-  item: Pick<FileChange, "diffStr" | "fileName" | "changes" | "oldStr" | "newStr">,
+  item: Pick<
+    FileChange,
+    "diffStr" | "diffTruncated" | "fileName" | "changes" | "oldStr" | "newStr"
+  >,
 ) {
   const diff = recordedText(item.diffStr);
   const operation = item.changes?.[0]?.operation;
@@ -72,6 +75,6 @@ export function toolCallDiff(
           { label: "Recorded content before", text: before.text },
           { label: "Recorded content after", text: after.text },
         ].filter((entry): entry is { label: string; text: string } => entry.text !== undefined),
-    truncated: diff.truncated || before.truncated || after.truncated,
+    truncated: item.diffTruncated === true || diff.truncated || before.truncated || after.truncated,
   };
 }

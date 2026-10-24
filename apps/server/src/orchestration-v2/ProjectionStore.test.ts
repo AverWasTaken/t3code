@@ -3406,6 +3406,34 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         workCursor = page.nextCursor;
       }
       assert.strictEqual(workIds.size, 999);
+      yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'file_change',
+        payload_json = json_set(payload_json, '$.type', 'file_change', '$.fileName', 'a.ts')
+        WHERE thread_id = ${threadId} AND ordinal = 2`;
+      const withEdit = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: sqlPageLimit,
+        userTurnLimit: 10,
+        deferWork: true,
+      });
+      const visibleEdit = withEdit.projection.visibleTurnItems.find(
+        (row) => row.item.ordinal === 2,
+      );
+      assert.strictEqual(visibleEdit?.item.type, "file_change");
+      assert.isUndefined(visibleEdit?.item.deferredWork);
+      const olderWithEdit = yield* projectionStore.getThreadHistoryPage(
+        threadId,
+        encodeThreadHistoryCursor({
+          snapshotSequence: 0,
+          sourceThreadId: threadId,
+          sourceItemId: "turn-item:bounded-sql-history:1000",
+          position: 1000,
+        }),
+        undefined,
+        false,
+        "deferred",
+      );
+      const olderEdit = olderWithEdit.items.find((row) => row.item.ordinal === 2);
+      assert.strictEqual(olderEdit?.item.type, "file_change");
+      assert.isUndefined(olderEdit?.item.deferredWork);
       for (const toolName of ["t3-code.delegate_task", "mcp__t3_code__delegate_task"]) {
         yield* sql`UPDATE orchestration_v2_projection_turn_items SET type = 'dynamic_tool',
           payload_json = json_set(payload_json, '$.type', 'dynamic_tool', '$.toolName', ${toolName})
