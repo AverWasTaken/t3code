@@ -33,6 +33,7 @@ import {
   resolveAssistantMessageCopyState,
   type MessagesTimelineRow,
   workEntryDisplayLabel,
+  workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
@@ -2429,6 +2430,21 @@ describe("v2 run and attempt history", () => {
         },
       },
       {
+        id: "superseded-edit-entry",
+        kind: "work" as const,
+        createdAt: "2026-01-01T00:00:04.250Z",
+        attempt: supersededAttempt,
+        entry: {
+          id: "superseded-edit",
+          createdAt: "2026-01-01T00:00:04.250Z",
+          runId,
+          label: "Edited file",
+          tone: "tool" as const,
+          itemType: "file_change" as const,
+          toolLifecycleStatus: "completed" as const,
+        },
+      },
+      {
         id: "superseded-thread-created-entry",
         kind: "event" as const,
         createdAt: "2026-01-01T00:00:04.500Z",
@@ -2488,6 +2504,7 @@ describe("v2 run and attempt history", () => {
     expect(collapsedRows.map((row) => row.id)).toEqual([
       "initial-user-entry",
       `attempt-fold:${supersededAttemptId}`,
+      "superseded-edit-entry",
       "superseded-thread-created-entry",
       "steer-user-entry",
       "active-assistant-entry",
@@ -2508,6 +2525,7 @@ describe("v2 run and attempt history", () => {
       `attempt-fold:${supersededAttemptId}`,
       "superseded-assistant-entry",
       "superseded-work-entry",
+      "superseded-edit-entry",
       "superseded-thread-created-entry",
       "steer-user-entry",
       "active-assistant-entry",
@@ -3926,3 +3944,75 @@ describe("shouldCollapseUserMessage", () => {
     expect(shouldCollapseUserMessage(`${citation} ${"More text. ".repeat(60)}`)).toBe(true);
   });
 });
+
+it.each(["completed", "failed", "stopped"] as const)(
+  "keeps chronological edits before and after the terminal answer visible, %s",
+  (toolLifecycleStatus) => {
+    const runId = RunId.make("inline-edit-run");
+    const createdAt = "2026-10-12T00:00:00Z";
+    const work = (id: string, itemType: "file_change" | "command_execution"): TimelineEntry => ({
+      id,
+      kind: "work",
+      createdAt,
+      entry: { id, createdAt, runId, label: id, tone: "tool", itemType, toolLifecycleStatus },
+    });
+    const answer: TimelineEntry = {
+      id: "answer",
+      kind: "message",
+      createdAt,
+      message: {
+        id: MessageId.make("inline-answer"),
+        role: "assistant",
+        text: "Done",
+        runId,
+        createdAt,
+        updatedAt: createdAt,
+        streaming: false,
+      },
+    };
+    const timelineEntries = [
+      work("command-1", "command_execution"),
+      work("edit-1", "file_change"),
+      work("command-2", "command_execution"),
+      work("edit-2", "file_change"),
+      answer,
+      work("edit-3", "file_change"),
+    ];
+    for (const expanded of [false, true]) {
+      const rows = deriveMessagesTimelineRows({
+        timelineEntries,
+        isWorking: false,
+        activeTurnStartedAt: null,
+        turnDiffSummaries: [],
+        supportsConversationRollback: false,
+        expandedRunIds: new Set(expanded ? [runId] : []),
+      });
+      const visible = rows.flatMap((row) =>
+        row.kind === "work"
+          ? row.groupedEntries
+              .filter((entry) => entry.itemType === "file_change")
+              .map((entry) => entry.id)
+          : row.kind === "message" && row.message.role === "assistant"
+            ? ["answer"]
+            : [],
+      );
+      expect(visible).toEqual(["edit-1", "edit-2", "answer", "edit-3"]);
+    }
+  },
+);
+
+it.each(["inProgress", "completed", "failed", "declined", "stopped", "idle"] as const)(
+  "keeps standalone edit details visible through neutral and terminal statuses, %s",
+  (toolLifecycleStatus) => {
+    expect(
+      workEntryIsVisibleInGroup({
+        id: "edit",
+        createdAt: "2026-10-12T00:00:00Z",
+        label: "Edit",
+        tone: "tool",
+        itemType: "file_change",
+        toolLifecycleStatus,
+      }),
+    ).toBe(true);
+  },
+);

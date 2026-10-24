@@ -1,3 +1,5 @@
+import { claudeFileChangePatch } from "./fileChangePatch.ts";
+import { INLINE_EDIT_AWAITING_REVIEW_TITLE } from "@t3tools/shared/inlineEdit";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 import {
@@ -2484,7 +2486,7 @@ function parseClaudeBackgroundTaskEntry(
 
 function fileNameFromClaudeTool(toolName: string, input: ClaudeNativeToolInput): string {
   return (
-    firstStringInputField(input, ["file_path", "path", "filename", "fileName"]) ??
+    firstStringInputField(input, ["file_path", "notebook_path", "path", "filename", "fileName"]) ??
     `${toolName} result`
   );
 }
@@ -5007,7 +5009,20 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     ...itemBase,
                     type: "file_change",
                     fileName: fileNameFromClaudeTool(input.toolName, input.toolInput),
-                    ...(outputText.length === 0 ? {} : { diffStr: outputText }),
+                    ...(itemBase.status === "failed"
+                      ? outputText.length === 0
+                        ? {}
+                        : { diffStr: outputText }
+                      : itemBase.status === "completed"
+                        ? {
+                            diffStr: claudeFileChangePatch(outputValue),
+                            ...(typeof outputValue === "object" &&
+                            outputValue !== null &&
+                            Reflect.get(outputValue, "staged") === true
+                              ? { title: INLINE_EDIT_AWAITING_REVIEW_TITLE }
+                              : {}),
+                          }
+                        : {}),
                   }
                 : itemType === "web_search"
                   ? {

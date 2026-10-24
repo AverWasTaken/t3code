@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./inlineEdit": {
+      "types": "./src/inlineEdit.ts",
+      "import": "./src/inlineEdit.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

@@ -6475,12 +6475,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     const updateB: FileUpdateChange = {
       path: "/w/b.ts",
       kind: { type: "update", move_path: null },
-      diff: "@@",
+      diff: "@@ -1 +1 @@\n-old\n+new\n",
     };
     const renameC: FileUpdateChange = {
       path: "/w/c.ts",
       kind: { type: "update", move_path: "/w/d.ts" },
-      diff: "@@",
+      diff: "@@ -1 +1 @@\n-old\n+new\n",
     };
 
     const deleteE: FileUpdateChange = { path: "/w/e.ts", kind: { type: "delete" }, diff: "gone" };
@@ -6675,6 +6675,41 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       ),
     );
 
+    it.effect("keeps repeated edits to one file isolated by native tool item", () =>
+      Effect.gen(function* () {
+        const { harness } = yield* startApprovalTurn("file-change-repeated", [
+          fileChange("completed", nativeTurnId, "patch-first", [addA]),
+          fileChange("completed", nativeTurnId, "patch-second", [
+            {
+              path: addA.path,
+              kind: { type: "update", move_path: null },
+              diff: "@@ -1 +1 @@\n-export {};\n+export const value = 1;\n",
+            },
+          ]),
+          turnCompleted(nativeTurnId),
+        ]);
+        yield* harness.firstTerminal;
+        const items = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "file_change"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.lengthOf(items, 2);
+        assert.notEqual(items[0]?.id, items[1]?.id);
+        assert.include(items[0]?.diffStr ?? "", "+++ b//w/a.ts\n@@ -0,0 +1,1 @@\n+export {};");
+        assert.notInclude(items[0]?.diffStr ?? "", "value = 1");
+        assert.equal(
+          items[1]?.diffStr,
+          "--- a//w/a.ts\n+++ b//w/a.ts\n@@ -1 +1 @@\n-export {};\n+export const value = 1;\n",
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    );
+
     it.effect("keeps every path of a completed multi-file patch", () =>
       Effect.gen(function* () {
         const { harness } = yield* startApprovalTurn("file-change-multi-path", [
@@ -6691,6 +6726,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         );
         assert.lengthOf(fileChanges, 1);
         assert.equal(fileChanges[0]?.fileName, "/w/c.ts");
+        assert.equal(
+          fileChanges[0]?.diffStr,
+          "--- a//w/c.ts\n+++ b//w/d.ts\n@@ -1 +1 @@\n-old\n+new\n--- a//w/e.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-gone\n\\ No newline at end of file\n--- /dev/null\n+++ b//w/a.ts\n@@ -0,0 +1,1 @@\n+export {};\n\\ No newline at end of file\n",
+        );
         assert.deepEqual(fileChanges[0]?.changes, [
           { operation: "update", path: "/w/d.ts", oldPath: "/w/c.ts" },
           { operation: "delete", path: "/w/e.ts" },

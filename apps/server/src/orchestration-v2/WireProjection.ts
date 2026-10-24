@@ -42,15 +42,33 @@ function truncateDetail(
 export function boundFileChangeForStorage(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   if (item.type !== "file_change") return item;
   const { diffStr, oldStr, newStr } = item;
-  const bounded = {
-    ...item,
-    ...(diffStr === undefined ? {} : { diffStr: truncateDetail(diffStr) }),
-    ...(oldStr === undefined ? {} : { oldStr: truncateDetail(oldStr) }),
-    ...(newStr === undefined ? {} : { newStr: truncateDetail(newStr) }),
+  // Patches use an explicit flag rather than appending non-patch text. This keeps
+  // the byte cap exact and repeated storage/detail projection idempotent.
+  const clip = (value: string | undefined) => {
+    if (
+      value === undefined ||
+      (value.length <= MAX_DETAIL_STRING_BYTES &&
+        Buffer.byteLength(value, "utf8") <= MAX_DETAIL_STRING_BYTES)
+    )
+      return value;
+    return Buffer.from(value.slice(0, MAX_DETAIL_STRING_BYTES), "utf8")
+      .subarray(0, MAX_DETAIL_STRING_BYTES)
+      .toString("utf8")
+      .replace(/\uFFFD$/u, "");
   };
-  return bounded.diffStr === diffStr && bounded.oldStr === oldStr && bounded.newStr === newStr
-    ? item
-    : bounded;
+  const boundedDiff = clip(diffStr);
+  const boundedOld = clip(oldStr);
+  const boundedNew = clip(newStr);
+  const truncated = boundedDiff !== diffStr || boundedOld !== oldStr || boundedNew !== newStr;
+  return truncated
+    ? {
+        ...item,
+        ...(diffStr === undefined ? {} : { diffStr: boundedDiff }),
+        ...(oldStr === undefined ? {} : { oldStr: boundedOld }),
+        ...(newStr === undefined ? {} : { newStr: boundedNew }),
+        diffTruncated: true,
+      }
+    : item;
 }
 
 function summarizeDynamicValue(value: unknown): unknown {
@@ -114,7 +132,10 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       const { diffStr, oldStr: _old, newStr: _new, ...projected } = item;
       return item.status === "failed" && diffStr?.trim()
         ? { ...projected, diffStr: truncateDetail(diffStr) }
-        : projected;
+        : {
+            ...projected,
+            ...(item.status === "completed" && diffStr?.trim() ? { diffOmitted: true } : {}),
+          };
     }
     case "subagent":
       return {
@@ -198,8 +219,19 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
         result:
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };
+    case "file_change": {
+      const {
+        diffOmitted: _omitted,
+        oldStr: _old,
+        newStr: _new,
+        ...detail
+      } = boundFileChangeForStorage(item) as Extract<
+        OrchestrationV2TurnItem,
+        { type: "file_change" }
+      >;
+      return detail;
+    }
     case "handoff":
-    case "file_change":
       return projectTurnItemForWire(item);
     default:
       return item;

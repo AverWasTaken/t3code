@@ -1641,3 +1641,96 @@ describe("streamed feed updates", () => {
     expect(showsDelegation(steps[3]!)).toBe(false);
   });
 });
+
+it.each([false, true])(
+  "keeps each edit visible after a turn completes, expanded=%s",
+  (expanded) => {
+    const edits = [0, 1, 2].map((index) => ({
+      ...base(`edit-${index}`, `2026-06-20T00:00:0${index + 3}.000Z`, index + 2),
+      type: "file_change" as const,
+      fileName: `${index}.ts`,
+      diffStr: "@@ -1 +1 @@\n-old\n+new",
+    }));
+    const items = [
+      userMessage(),
+      command(),
+      edits[0]!,
+      { ...command(), id: TurnItemId.make("command-2") },
+      edits[1]!,
+      edits[2]!,
+      assistantMessage("2026-06-20T00:00:09.000Z"),
+    ];
+    const result = deriveThreadFeedPresentation(
+      buildThreadFeed(items.map((item, index) => projected(item, index))),
+      null,
+      new Set(),
+      new Set(expanded ? ["work-group:item-command"] : []),
+    );
+    const editRows = result.filter(
+      (entry) =>
+        entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.projectedItem.item.type === "file_change"),
+    );
+    expect(
+      editRows.map((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.map((activity) => activity.projectedItem.item.id)
+          : [],
+      ),
+    ).toEqual(edits.map((edit) => [edit.id]));
+  },
+);
+
+it.each(["completed", "failed", "cancelled"] as const)(
+  "retains standalone edits through streamed completion and replay, %s",
+  (status) => {
+    const cache = createThreadFeedCache();
+    const edit = {
+      ...base("streamed-edit", "2026-06-20T00:00:03.000Z", 2),
+      type: "file_change" as const,
+      fileName: "edit.ts",
+      diffOmitted: true,
+      status,
+    };
+    const running: ThreadFeedLatestRun = {
+      runId,
+      status: "running",
+      startedAt: "2026-06-20T00:00:01.000Z",
+      completedAt: null,
+    };
+    const steps = [
+      [userMessage(), command(), { ...edit, status: "running" as const }],
+      [userMessage(), command(), edit],
+      [userMessage(), command(), edit, assistantMessage()],
+    ];
+    for (const [index, items] of steps.entries()) {
+      const latestRun =
+        index === 2
+          ? { ...running, status: "completed" as const, completedAt: "2026-06-20T00:00:04.000Z" }
+          : running;
+      const projectedItems = items.map((item, position) => projected(item, position));
+      const present = (feedCache?: ThreadFeedCache) =>
+        deriveThreadFeedPresentation(
+          buildThreadFeed(projectedItems, { cache: feedCache }),
+          latestRun,
+          new Set(),
+          new Set(),
+          null,
+          false,
+          feedCache,
+        );
+      const streamed = present(cache);
+      const replayed = present();
+      const visibleEdits = (entries: ReadonlyArray<ThreadFeedEntry>) =>
+        entries.flatMap((entry) =>
+          entry.type === "activity-group"
+            ? entry.activities
+                .filter((activity) => activity.projectedItem.item.type === "file_change")
+                .map((activity) => activity.projectedItem.item.id)
+            : [],
+        );
+      expect(visibleEdits(streamed)).toEqual([edit.id]);
+      expect(visibleEdits(replayed)).toEqual([edit.id]);
+    }
+  },
+);

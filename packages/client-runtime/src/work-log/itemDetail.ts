@@ -132,6 +132,8 @@ export function turnItemDetailRevision(item: OrchestrationV2TurnItem): string {
 
 export function turnItemNeedsDetailFetch(item: OrchestrationV2TurnItem): boolean {
   switch (item.type) {
+    case "file_change":
+      return item.status === "completed" && item.diffOmitted === true;
     case "command_execution":
       return item.outputOmitted === true;
     case "dynamic_tool":

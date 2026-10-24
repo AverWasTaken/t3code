@@ -42,7 +42,10 @@ export function toolItemForDisplay(item: OrchestrationV2TurnItem): Orchestration
       // A failed edit's diffStr holds the provider's error, not a diff.
       return item.status === "failed" && diffStr?.trim()
         ? { ...displayItem, diffStr }
-        : displayItem;
+        : {
+            ...displayItem,
+            ...(item.status === "completed" && diffStr?.trim() ? { diffOmitted: true } : {}),
+          };
     }
     default:
       return item;

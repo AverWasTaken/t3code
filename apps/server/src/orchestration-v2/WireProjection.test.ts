@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 
 import {
   projectTurnItemForWire,
+  boundFileChangeForStorage,
   projectTurnItemForDetail,
   projectDomainEventForWire,
 } from "./WireProjection.ts";
@@ -278,6 +279,34 @@ describe("orchestration V2 wire projection", () => {
     });
     expect(failed).toMatchObject({ diffStr: "String to replace not found" });
     expect(failed).not.toHaveProperty("newStr");
+  });
+
+  it("marks compact edit bodies and returns bounded idempotent details", () => {
+    const item = {
+      ...base,
+      status: "completed" as const,
+      type: "file_change" as const,
+      fileName: "a",
+      diffStr: "\u{1F600}".repeat(10_000),
+    };
+    const stored = boundFileChangeForStorage(item);
+    expect(stored.type === "file_change" && stored.diffTruncated).toBe(true);
+    expect(
+      stored.type === "file_change" && Buffer.byteLength(stored.diffStr!, "utf8"),
+    ).toBeLessThanOrEqual(32_768);
+    expect(boundFileChangeForStorage(stored)).toEqual(stored);
+    const compact = projectTurnItemForWire(stored);
+    expect(compact).toMatchObject({ diffOmitted: true, diffTruncated: true });
+    expect(compact).not.toHaveProperty("diffStr");
+    expect(projectTurnItemForWire(compact)).toEqual(compact);
+    const detail = projectTurnItemForDetail(stored);
+    expect(detail).toMatchObject({
+      diffStr: stored.type === "file_change" ? stored.diffStr : "",
+      diffTruncated: true,
+    });
+    expect(detail).not.toHaveProperty("diffOmitted");
+    const exact = { ...item, diffStr: "a\uFFFD", oldStr: "", newStr: "ok\uFFFD" };
+    expect(boundFileChangeForStorage(exact)).toBe(exact);
   });
 
   it("retains only result identities and failure metadata in live tool events", () => {

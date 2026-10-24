@@ -1,3 +1,5 @@
+import { InlineEditPatch } from "./InlineEditPatch";
+import { workEntryExpanded } from "@t3tools/shared/inlineEdit";
 import { Button } from "../../components/ui/Button";
 import { SubagentStatusDot } from "./SubagentStatusDot";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
@@ -507,7 +509,7 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       row={row}
       anchorKey={props.anchorKey}
       copied={props.copiedRowId === row.id}
-      expanded={props.expandedRows[row.id] ?? false}
+      expanded={workEntryExpanded(props.expandedRows[row.id], row.workEntry.itemType)}
       environmentId={props.environmentId}
       iconSubtleColor={props.iconSubtleColor}
       onCopyRow={props.onCopyRow}
@@ -699,7 +701,8 @@ function ThreadWorkGroupList(props: {
     return unsubscribe;
   }, []);
   const getFixedItemSize = (row: ThreadFeedActivity, index: number) =>
-    props.expandedRows[row.id] || props.rowSizing.fixedRowHeight === undefined
+    workEntryExpanded(props.expandedRows[row.id], row.workEntry.itemType) ||
+    props.rowSizing.fixedRowHeight === undefined
       ? undefined
       : props.rowSizing.fixedRowHeight + (index < props.activities.length - 1 ? WORK_ROW_GAP : 0);
   const renderItem = ({ item, index }: { item: ThreadFeedActivity; index: number }) => (
@@ -1169,7 +1172,8 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
       </WorkLogPressable>
 
       {expanded &&
-      (reasoning ||
+      (shownItem.type === "file_change" ||
+        reasoning ||
         fullDetail ||
         call ||
         fetchedOutput ||
@@ -1215,10 +1219,17 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             nestedScrollEnabled
             directionalLockEnabled
             showsVerticalScrollIndicator
-            className="max-h-60"
+            scrollEnabled={shownItem.type !== "file_change"}
+            className={shownItem.type === "file_change" ? undefined : "max-h-60"}
             contentContainerStyle={{ paddingRight: 8 }}
           >
-            {reasoning ? (
+            {shownItem.type === "file_change" ? (
+              <InlineEditPatch
+                item={shownItem}
+                pending={fetchedDetail.isPending && row.fetchesDetail && !fetchedItem}
+                error={fetchedDetail.error}
+              />
+            ) : reasoning ? (
               props.renderReasoning(reasoning.text)
             ) : call ? (
               [
@@ -1258,7 +1269,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
                 {fullDetail}
               </Text>
             ) : null}
-            {fetchedOutput ? (
+            {fetchedOutput && shownItem.type !== "file_change" ? (
               <Text
                 selectable
                 className={cn(

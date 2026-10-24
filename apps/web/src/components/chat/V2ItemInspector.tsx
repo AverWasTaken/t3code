@@ -1,3 +1,6 @@
+import { FileDiff } from "@pierre/diffs/react";
+import { INLINE_EDIT_AWAITING_REVIEW_TITLE, inlineEditPreview } from "@t3tools/shared/inlineEdit";
+import { DiffWorkerPoolProvider } from "../DiffWorkerPoolProvider";
 import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
@@ -18,8 +21,12 @@ import { memo, type ReactNode, Suspense, use } from "react";
 
 import { useRenderedAppearance } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
-import { resolveDiffThemeName } from "../../lib/diffRendering";
-import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
+import {
+  getRenderablePatch,
+  buildFileDiffIdentityKey,
+  resolveDiffThemeName,
+} from "../../lib/diffRendering";
+import { PREFERRED_HIGHLIGHTER, getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
 import { useTurnItemDetail } from "../../state/queries";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
@@ -234,6 +241,73 @@ function ToolCallBody(
   );
 }
 
+function InlineEditPatch({
+  patch,
+  truncated,
+}: {
+  readonly patch: string;
+  readonly truncated?: boolean | undefined;
+}) {
+  const appearance = useRenderedAppearance();
+  const preview = inlineEditPreview(patch, truncated);
+  const rendered = preview.limited ? null : getRenderablePatch(preview.text, "inline-edit");
+  if (!preview.isPatch)
+    return <p className="text-muted-foreground">Patch unavailable for this edit.</p>;
+  const raw = (
+    <pre className="min-w-max font-mono text-xs leading-relaxed select-text">
+      {preview.lines.map((line, index) => (
+        <div
+          key={index}
+          className={cn(
+            line.startsWith("+") && !line.startsWith("+++ ")
+              ? "bg-diff-addition/10 text-diff-addition"
+              : line.startsWith("-") && !line.startsWith("--- ")
+                ? "bg-diff-deletion/10 text-diff-deletion"
+                : "text-muted-foreground",
+          )}
+        >
+          {line || " "}
+        </div>
+      ))}
+    </pre>
+  );
+  return (
+    <div
+      className="space-y-1"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      {preview.limited ? (
+        <p className="text-muted-foreground">Patch preview truncated.</p>
+      ) : rendered?.kind === "raw" ? (
+        <p className="text-muted-foreground">{rendered.reason}</p>
+      ) : null}
+      <div className="max-h-90 overflow-auto rounded-md border border-border/45">
+        <RenderErrorBoundary fallback={raw}>
+          {rendered?.kind === "files" ? (
+            <DiffWorkerPoolProvider>
+              {rendered.files.map((fileDiff) => (
+                <FileDiff
+                  key={buildFileDiffIdentityKey(fileDiff)}
+                  fileDiff={fileDiff}
+                  options={{
+                    collapsed: false,
+                    diffStyle: "unified",
+                    theme: resolveDiffThemeName(appearance),
+                    preferredHighlighter: PREFERRED_HIGHLIGHTER,
+                  }}
+                />
+              ))}
+            </DiffWorkerPoolProvider>
+          ) : (
+            raw
+          )}
+        </RenderErrorBoundary>
+      </div>
+    </div>
+  );
+}
+
 export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspectorProps) {
   // Command rows stream their output, including the final output, from the server.
   const streamsOutput =
@@ -299,10 +373,27 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
                 variant="outline"
                 onClick={() => props.onOpenTurnDiff(item.runId!, item.fileName)}
               >
-                Open diff
+                Open turn diff
               </Button>
             ) : null}
           </div>
+          {item.title === INLINE_EDIT_AWAITING_REVIEW_TITLE ? (
+            <p className="text-muted-foreground">
+              Awaiting review. This edit has not been applied.
+            </p>
+          ) : item.status === "completed" ? (
+            item.diffStr?.trim() ? (
+              <InlineEditPatch patch={item.diffStr} truncated={item.diffTruncated} />
+            ) : outputState.pending ? (
+              <p className="text-muted-foreground">Loading edit patch...</p>
+            ) : outputState.error ? (
+              <p className="text-destructive">Couldn't load edit patch: {outputState.error}</p>
+            ) : (
+              <p className="text-muted-foreground">Patch unavailable for this edit.</p>
+            )
+          ) : item.status !== "failed" ? (
+            <p className="text-muted-foreground">This edit has not completed successfully.</p>
+          ) : null}
           {item.status === "failed" && item.diffStr?.trim() ? (
             <StructuredValue value={item.diffStr} />
           ) : null}

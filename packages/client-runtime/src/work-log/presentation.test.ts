@@ -12,9 +12,23 @@ import {
   workEntryIndicatesToolSuccess,
 } from "./presentation.js";
 
+it("retains the detail marker when compacting a completed edit", () => {
+  const item: Extract<OrchestrationV2TurnItem, { type: "file_change" }> = {
+    ...commandItem(),
+    type: "file_change",
+    fileName: "a",
+    diffStr: "patch",
+  };
+  expect(toolItemForDisplay(item)).toMatchObject({ diffOmitted: true });
+  expect(toolItemForDisplay(item)).not.toHaveProperty("diffStr");
+  expect(toolItemForDisplay({ ...item, status: "failed", diffStr: "Edit failed" })).toMatchObject({
+    diffStr: "Edit failed",
+  });
+});
+
 function commandItem(
   fields: Partial<Extract<OrchestrationV2TurnItem, { type: "command_execution" }>> = {},
-): OrchestrationV2TurnItem {
+): Extract<OrchestrationV2TurnItem, { type: "command_execution" }> {
   return {
     id: TurnItemId.make("command"),
     threadId: ThreadId.make("thread"),
