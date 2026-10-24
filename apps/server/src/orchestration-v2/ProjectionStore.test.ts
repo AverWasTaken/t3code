@@ -4874,6 +4874,32 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           occurredAt: now,
           payload: item,
         });
+      yield* writeSecondItem({ ...secondItem, type: "file_change", fileName: "a.ts" });
+      const withEdit = yield* projectionStore.getThreadSnapshotWindow(threadId, {
+        rowLimit: sqlPageLimit,
+        userTurnLimit: 10,
+        deferWork: true,
+      });
+      const visibleEdit = withEdit.projection.visibleTurnItems.find(
+        (row) => row.item.ordinal === 2,
+      );
+      assert.strictEqual(visibleEdit?.item.type, "file_change");
+      assert.isUndefined(visibleEdit?.item.deferredWork);
+      const olderWithEdit = yield* historyPage(
+        threadId,
+        encodeThreadHistoryCursor({
+          snapshotSequence: 0,
+          sourceThreadId: threadId,
+          sourceItemId: "turn-item:bounded-sql-history:1000",
+          position: 1000,
+        }),
+        undefined,
+        false,
+        "deferred",
+      );
+      const olderEdit = olderWithEdit.items.find((row) => row.item.ordinal === 2);
+      assert.strictEqual(olderEdit?.item.type, "file_change");
+      assert.isUndefined(olderEdit?.item.deferredWork);
       for (const inline of [
         { toolName: "t3-code.delegate_task" },
         { toolName: "mcp__t3_code__delegate_task" },

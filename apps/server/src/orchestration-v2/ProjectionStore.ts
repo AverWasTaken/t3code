@@ -2345,8 +2345,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const sql = yield* SqlClient.SqlClient;
 
     // SQLite uses the partial conversation index of migration 082 only for this exact predicate.
+    // File edits still match its on-disk definition even though they are no longer deferred.
     const CONVERSATION_INDEX_EXCLUDED_TYPES = sql.literal(
-      `(${DEFERRED_WORK_ITEM_TYPES.map((type) => `'${type}'`).join(", ")})`,
+      "('command_execution', 'reasoning', 'file_change', 'file_search', 'web_search', 'dynamic_tool')",
     );
 
     // Other node indexes also start with thread_id. Without this hint SQLite reads a thread's live

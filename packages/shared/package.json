@@ -7,6 +7,10 @@
       "types": "./src/png.ts",
       "import": "./src/png.ts"
     },
+    "./inlineEdit": {
+      "types": "./src/inlineEdit.ts",
+      "import": "./src/inlineEdit.ts"
+    },
     "./pullRequestAnchor": {
       "types": "./src/pullRequestAnchor.ts",
       "import": "./src/pullRequestAnchor.ts"
