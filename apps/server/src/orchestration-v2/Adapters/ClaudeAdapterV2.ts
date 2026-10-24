@@ -26,6 +26,7 @@ import {
   type EffortLevel,
   type ForkSessionOptions,
   type ForkSessionResult,
+  type HookCallback,
   getSessionMessages,
   getSubagentMessages,
   query,
@@ -3505,6 +3506,10 @@ interface ActiveClaudeSubagent {
 }
 
 interface ClaudeLiveQueryContext {
+  readonly effortObservation: {
+    active: boolean;
+    readonly reports: Map<string, string>;
+  };
   readonly queryPolicy: ClaudeRuntimeQueryPolicy;
   readonly nativeThreadId: string;
   readonly query: ClaudeAgentSdkQuerySession;
@@ -3592,9 +3597,13 @@ function claudeSubagentModelSelection(
   );
   const offered =
     effort !== undefined &&
-    descriptor?.type === "select" &&
-    descriptor.options.some((option) => option.id === effort);
+    (isClaudeObservedEffort(effort) ||
+      (descriptor?.type === "select" && descriptor.options.some((option) => option.id === effort)));
   return { instanceId, model, ...(offered ? { options: [{ id: "effort", value: effort }] } : {}) };
+}
+
+function isClaudeObservedEffort(effort: string | undefined): effort is string {
+  return effort !== undefined && ["low", "medium", "high", "xhigh", "max"].includes(effort);
 }
 
 // The run whose end settles this subagent inside the adapter. A nested row is
@@ -5578,7 +5587,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly prompt?: string;
           readonly title?: string;
           readonly model?: string;
-          readonly effort?: string;
+          readonly effort?: string | undefined;
           readonly owner?: ActiveClaudeSubagent;
           readonly nativeTaskType?: string;
           readonly progress?: string;
@@ -5705,12 +5714,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             workflow === undefined
               ? undefined
               : withWorkflowMemberThreadIds(workflow, childThreadId);
-          const effort =
-            existingSubagent === undefined
-              ? (input.effort ??
-                input.owner?.effort ??
-                compileClaudeModelSelection(input.context.input.modelSelection).effort)
-              : existingSubagent.effort;
+          const effort = input.effort ?? existingSubagent?.effort;
           const model = input.model ?? priorTask?.model ?? null;
           const task = {
             ...(priorTask ?? {
@@ -5748,16 +5752,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
             ...(input.title === undefined ? {} : { title: input.title }),
             model,
-            ...(existingSubagent === undefined || existingSubagent.task.modelSelection !== undefined
-              ? {
-                  modelSelection: claudeSubagentModelSelection(
-                    subagentModelCatalog,
-                    input.context.input.modelSelection.instanceId,
-                    model || input.context.input.modelSelection.model,
-                    effort,
-                  ),
-                }
-              : {}),
+            modelSelection: claudeSubagentModelSelection(
+              subagentModelCatalog,
+              input.context.input.modelSelection.instanceId,
+              model || input.context.input.modelSelection.model,
+              effort,
+            ),
             ...(input.progress === undefined ? {} : { progress: input.progress }),
             ...(workflowWithThreads === undefined ? {} : { workflow: workflowWithThreads }),
             ...(input.result === undefined ? {} : { result: input.result }),
@@ -5823,6 +5823,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ) {
               return [false, current] as const;
             }
+            if (input.effort === undefined && registered?.effort !== undefined) {
+              subagent.effort = registered.effort;
+              task.modelSelection = claudeSubagentModelSelection(
+                subagentModelCatalog,
+                task.modelSelection.instanceId,
+                task.modelSelection.model,
+                registered.effort,
+              );
+            }
             return [true, new Map(current).set(input.taskId, subagent)] as const;
           });
           if (!accepted) return;
@@ -5860,7 +5869,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               parentNodeId: nodeId,
               activeProviderThreadId: null,
               providerInstanceId: input.context.input.modelSelection.instanceId,
-              modelSelection: task.modelSelection ?? input.context.input.modelSelection,
+              modelSelection: task.modelSelection,
               title: subagentThreadTitle({
                 parentTitle: parentThread.title,
                 prompt: task.prompt,
@@ -5882,6 +5891,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               ...(existingSubagent === undefined ? {} : { createOnly: true }),
             });
             subagent.childThread = childThread;
+          } else {
+            subagent.childThread = { ...subagent.childThread, modelSelection: task.modelSelection };
           }
 
           if (lifecycleChanged) {
@@ -8274,7 +8285,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 ...(message.tool_use_id === undefined ? {} : { toolUseId: message.tool_use_id }),
                 ...(message.prompt === undefined ? {} : { prompt: message.prompt }),
                 ...(model === undefined ? {} : { model }),
-                ...(launch?.effort === undefined ? {} : { effort: launch.effort }),
+                effort: liveQuery.effortObservation.reports.get(message.task_id) ?? launch?.effort,
                 ...(owner === undefined ? {} : { owner }),
                 ...(isWorkflow
                   ? {
@@ -9408,6 +9419,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
           const closedExistingNativeThreadId = existing !== null ? existing.nativeThreadId : null;
           if (existing !== null) {
+            existing.effortObservation.active = false;
+            existing.effortObservation.reports.clear();
             yield* existing.query.close.pipe(Effect.ignore);
             if (existing.nativeThreadId !== nativeThreadId) {
               yield* clearWakeStateForNativeThread(existing.nativeThreadId);
@@ -9425,6 +9438,57 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.nativeThreadHasTurns ?? turnInput.providerTurnOrdinal > 1;
           const shouldResume =
             resumeSessionAt !== undefined || openedWithResume || hasPersistedProviderTurn;
+          const effortObservation = { active: true, reports: new Map<string, string>() };
+          // Hooks can precede task_started, and the CLI waits for their response.
+          // Defer registry work under the stream lock without delaying that response.
+          const observeSubagentEffort: HookCallback = async (hook) => {
+            const agentId = hook.agent_id;
+            const effort = hook.effort?.level;
+            if (
+              !effortObservation.active ||
+              agentId === undefined ||
+              agentId.length === 0 ||
+              !isClaudeObservedEffort(effort)
+            ) {
+              return {};
+            }
+            void runPromise(
+              sdkMessageLock
+                .withPermits(1)(
+                  Effect.gen(function* () {
+                    if (!effortObservation.active) return;
+                    effortObservation.reports.set(agentId, effort);
+                    if (effortObservation.reports.size > PENDING_CLAUDE_SUBAGENT_CAP) {
+                      const oldest = effortObservation.reports.keys().next();
+                      if (!oldest.done) effortObservation.reports.delete(oldest.value);
+                    }
+                    const live = yield* Ref.get(queryContext);
+                    if (live?.effortObservation !== effortObservation || live.lastTurn === null)
+                      return;
+                    const subagent = (yield* Ref.get(sessionSubagentsByTaskId)).get(agentId);
+                    if (
+                      subagent === undefined ||
+                      live.subagentsFromEarlierProcesses.has(subagent) ||
+                      subagent.effort === effort ||
+                      (subagent.task.status !== "running" &&
+                        subagent.task.status !== "completed" &&
+                        subagent.task.status !== "failed" &&
+                        subagent.task.status !== "cancelled")
+                    )
+                      return;
+                    live.lastTurn.subagentsByTaskId.set(agentId, subagent);
+                    yield* updateClaudeSubagentNode({
+                      context: live.lastTurn,
+                      taskId: agentId,
+                      effort,
+                      status: subagent.task.status,
+                    });
+                  }),
+                )
+                .pipe(Effect.ignoreCause, Effect.forkIn(sessionScope)),
+            ).catch(() => {});
+            return {};
+          };
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
@@ -9458,6 +9522,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
           });
+          queryOptions.hooks = {
+            PreToolUse: [{ hooks: [observeSubagentEffort] }],
+            SubagentStop: [{ hooks: [observeSubagentEffort] }],
+          };
           const querySession = yield* queryRunner
             .open({
               threadId: turnInput.threadId,
@@ -9465,6 +9533,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               options: queryOptions,
             })
             .pipe(
+              Effect.onError(() =>
+                Effect.sync(() => {
+                  effortObservation.active = false;
+                  effortObservation.reports.clear();
+                }),
+              ),
               Effect.onError(() =>
                 closedExistingNativeThreadId === nativeThreadId
                   ? Effect.gen(function* () {
@@ -9492,6 +9566,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           });
           const closed = yield* Deferred.make<void, never>();
           const context: ClaudeLiveQueryContext = {
+            effortObservation,
             queryPolicy,
             nativeThreadId,
             query: querySession,
@@ -9538,6 +9613,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             Effect.exit,
             Effect.flatMap(
               Effect.fnUntraced(function* (exit: ClaudeQueryStreamExit) {
+                effortObservation.active = false;
+                effortObservation.reports.clear();
                 const heldContext = yield* Ref.get(activeTurn);
                 if (
                   (yield* Ref.get(queryContext))?.query === querySession &&

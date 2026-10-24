@@ -1393,20 +1393,13 @@ const decodeCodexResumeMetadata = Schema.decodeUnknownEffect(
   Schema.Struct({ thread: Schema.Struct({ id: Schema.String, updatedAt: Schema.Number }) }),
 );
 
-const CodexChildSelection = Schema.Struct({
-  thread: Schema.Struct({ id: Schema.String }),
-  model: Schema.NullOr(Schema.String),
-  reasoningEffort: Schema.optional(Schema.NullOr(Schema.String)),
-  serviceTier: Schema.optional(Schema.NullOr(Schema.String)),
-});
-const decodeCodexChildModel = Schema.decodeUnknownEffect(CodexChildSelection);
-
 const decodeCodexChildThread = Schema.decodeUnknownEffect(
   Schema.Struct({
     thread: Schema.Struct({
       id: Schema.String,
       model: Schema.optional(Schema.NullOr(Schema.String)),
       reasoningEffort: Schema.optional(Schema.NullOr(Schema.String)),
+      serviceTier: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   }),
 );
@@ -2891,8 +2884,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               parentNodeId: subagentNodeId,
               activeProviderThreadId: providerThread.id,
               providerInstanceId: input.context.input.modelSelection.instanceId,
-              modelSelection: {
-                ...input.context.input.modelSelection,
+              modelSelection: task.modelSelection ?? {
+                instanceId: input.context.input.modelSelection.instanceId,
                 model: task.model ?? input.context.input.modelSelection.model,
               },
               title: subagentThreadTitle({
@@ -3028,40 +3021,30 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             for (const pendingTurn of pendingTurns) {
               yield* emitSubagentProviderTurnStarted(subagent, pendingTurn);
             }
-            if (task.model === null) {
+            const lookupSelection = subagentSelections.get(input.nativeThreadId);
+            if (!lookupSelection?.options?.some(({ id }) => id === "reasoningEffort")) {
               yield* client.raw
                 .request("thread/read", { threadId: input.nativeThreadId, includeTurns: false })
                 .pipe(
                   Effect.flatMap(decodeCodexChildThread),
-                  Effect.map((response): typeof CodexChildSelection.Type | null =>
-                    response.thread.id === input.nativeThreadId && response.thread.model?.trim()
-                      ? {
-                          thread: response.thread,
-                          model: response.thread.model,
-                          reasoningEffort: response.thread.reasoningEffort,
-                        }
-                      : null,
-                  ),
-                  Effect.catch(() => Effect.succeed(null)),
-                  Effect.flatMap((response) =>
-                    response === null
-                      ? client.raw
-                          .request("thread/resume", {
-                            threadId: input.nativeThreadId,
-                            excludeTurns: true,
-                          })
-                          .pipe(Effect.flatMap(decodeCodexChildModel))
-                      : Effect.succeed(response),
-                  ),
+                  Effect.map(({ thread }) => ({
+                    ...thread,
+                    model: thread.model?.trim() || lookupSelection?.model,
+                  })),
                   Effect.timeout("5 seconds"),
                   Effect.flatMap((response) =>
-                    response.thread.id === input.nativeThreadId &&
-                    !subagentSelections.has(input.nativeThreadId)
+                    response.id === input.nativeThreadId &&
+                    response.model?.trim() &&
+                    (!lookupSelection || response.model === lookupSelection.model) &&
+                    // A notification received during the lookup is newer than its response.
+                    subagentSelections.get(input.nativeThreadId) === lookupSelection
                       ? updateSubagentSelection(
                           input.nativeThreadId,
                           response.model,
                           response.reasoningEffort,
-                          response.serviceTier,
+                          lookupSelection?.options?.some(({ id }) => id === "serviceTier")
+                            ? undefined
+                            : response.serviceTier,
                         )
                       : Effect.void,
                   ),
@@ -6697,15 +6680,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                   }),
                 ),
               ),
-              Effect.map((response): OrchestrationV2ProviderThread =>
-                providerThreadFromCodexThread({
-                  appThreadId: threadInput.threadId,
-                  idAllocator,
-                  ownerNodeId: null,
-                  providerSessionId: input.providerSessionId,
-                  providerInstanceId: adapterOptions.instanceId,
-                  thread: response.thread,
-                }),
+              Effect.map(
+                (response): OrchestrationV2ProviderThread =>
+                  providerThreadFromCodexThread({
+                    appThreadId: threadInput.threadId,
+                    idAllocator,
+                    ownerNodeId: null,
+                    providerSessionId: input.providerSessionId,
+                    providerInstanceId: adapterOptions.instanceId,
+                    thread: response.thread,
+                  }),
               ),
               Effect.mapError(
                 (cause) =>

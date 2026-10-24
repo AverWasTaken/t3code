@@ -5236,14 +5236,217 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect.each(["model/rerouted"] as const)(
+  it.effect.each([
+    "spawn",
+    "spawn after model notification",
+    "before registration",
+    "after registration",
+    "known model",
+    "effort-only read",
+    "existing service tier",
+    "model-only read",
+    "unavailable",
+    "wrong thread",
+    "wrong model",
+  ] as const)("uses actual child reasoning metadata from %s", (source) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const childModel = "gpt-6-astra";
+        const explicit = source === "spawn" || source === "spawn after model notification";
+        const knownModel =
+          explicit ||
+          source === "before registration" ||
+          source === "known model" ||
+          source === "wrong model" ||
+          source === "effort-only read";
+        const existingTier =
+          source === "existing service tier" || source === "spawn after model notification";
+        const unknown = ["unavailable", "wrong thread", "wrong model", "model-only read"].includes(
+          source,
+        );
+        const settings: CodexReplay.CodexAppServerReplayEntry = {
+          type: "emit_inbound",
+          frame: {
+            method: "thread/settings/updated",
+            params: {
+              threadId: RESUME_CHILD_THREAD,
+              threadSettings: {
+                model: childModel,
+                effort: existingTier ? null : "low",
+                serviceTier: "ultrafast",
+                modelProvider: "openai",
+                cwd: "/workspace",
+                approvalPolicy: "never",
+                approvalsReviewer: "auto_review",
+                collaborationMode: { mode: "default", settings: { model: childModel } },
+                sandboxPolicy: { type: "dangerFullAccess" },
+              },
+            },
+          },
+        };
+        const methods: string[] = [];
+        const transcript = {
+          ...resumeSubagentTranscript,
+          entries: resumeSubagentTranscript.entries
+            .slice(
+              0,
+              resumeSubagentTranscript.entries.findIndex(
+                (entry) => entry.type === "emit_inbound" && entry.label === "turn/completed/root",
+              ) + 1,
+            )
+            .map(
+              (entry): CodexReplay.CodexAppServerReplayEntry =>
+                entry.type === "emit_inbound" ? { ...entry, afterMs: 0 } : entry,
+            )
+            .flatMap((entry): Array<CodexReplay.CodexAppServerReplayEntry> => {
+              if (entry.type === "expect_outbound" && entry.label === "turn/start") {
+                if (!Predicate.isObject(entry.frame) || !Predicate.isObject(entry.frame.params))
+                  return [entry];
+                return [
+                  {
+                    ...entry,
+                    frame: { ...entry.frame, params: { ...entry.frame.params, effort: "high" } },
+                  },
+                ];
+              }
+              if (
+                entry.type !== "emit_inbound" ||
+                entry.label !== "item/completed/subAgentActivity-started"
+              )
+                return [entry];
+              const spawn: CodexReplay.CodexAppServerReplayEntry = knownModel
+                ? {
+                    ...entry,
+                    frame: {
+                      method: "item/completed",
+                      params: {
+                        threadId: RESUME_NATIVE_THREAD,
+                        turnId: RESUME_NATIVE_TURN,
+                        item: {
+                          type: "collabAgentToolCall",
+                          id: "call-codex-resume-spawn",
+                          tool: "spawnAgent",
+                          status: "completed",
+                          senderThreadId: RESUME_NATIVE_THREAD,
+                          receiverThreadIds: [RESUME_CHILD_THREAD],
+                          agentsStates: {},
+                          model: childModel,
+                          ...(explicit
+                            ? { reasoningEffort: "low" }
+                            : source === "before registration"
+                              ? { reasoningEffort: "high" }
+                              : {}),
+                        },
+                      },
+                    },
+                  }
+                : entry;
+              return source === "before registration" || existingTier
+                ? [settings, spawn]
+                : source === "after registration"
+                  ? [spawn, settings]
+                  : [spawn];
+            }),
+        };
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          undefined,
+          (threadId, method) => {
+            methods.push(method);
+            if (source === "after registration") return Effect.never;
+            const model = source === "wrong model" ? "gpt-5.4" : childModel;
+            const id = source === "wrong thread" ? "another-child" : threadId;
+            return Effect.succeed(
+              source === "unavailable"
+                ? {}
+                : {
+                    thread: {
+                      id,
+                      ...(source === "effort-only read" ? {} : { model }),
+                      ...(source === "model-only read"
+                        ? {}
+                        : {
+                            reasoningEffort: "low",
+                            serviceTier: existingTier ? "fast" : "ultrafast",
+                          }),
+                    },
+                  },
+            );
+          },
+        );
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-child-effort-${source}`),
+            text: RESUME_PROMPT,
+          }),
+          modelSelection: {
+            ...CODEX_TEST_MODEL_SELECTION,
+            options: [{ id: "reasoningEffort", value: "high" }],
+          },
+        });
+        yield* harness.awaitTerminal(1);
+        const created = harness.events.find((event) => event.type === "app_thread.created");
+        assert.equal(created?.type, "app_thread.created");
+        if (created?.type !== "app_thread.created") return;
+        assert.deepEqual(
+          created.appThread.modelSelection.options?.toSorted((a, b) => a.id.localeCompare(b.id)),
+          source === "spawn" || source === "before registration"
+            ? [
+                { id: "reasoningEffort", value: "low" },
+                ...(source === "spawn" ? [] : [{ id: "serviceTier", value: "ultrafast" }]),
+              ]
+            : existingTier
+              ? [{ id: "serviceTier", value: "ultrafast" }]
+              : undefined,
+        );
+        if (!unknown) {
+          yield* harness.until(() =>
+            harness
+              .subagentUpdates()
+              .some((event) =>
+                event.subagent.modelSelection?.options?.some(
+                  (option) => option.id === "reasoningEffort" && option.value === "low",
+                ),
+              ),
+          );
+          assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, childModel);
+          assert.deepEqual(
+            harness
+              .subagentUpdates()
+              .at(-1)
+              ?.subagent.modelSelection?.options?.toSorted((a, b) => a.id.localeCompare(b.id)),
+            [
+              { id: "reasoningEffort", value: "low" },
+              ...(source === "spawn" ? [] : [{ id: "serviceTier", value: "ultrafast" }]),
+            ],
+          );
+        } else {
+          assert.isUndefined(harness.subagentUpdates().at(-1)?.subagent.modelSelection?.options);
+        }
+        assert.deepEqual(
+          methods,
+          source === "spawn" || source === "before registration" ? [] : ["thread/read"],
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each(["model/rerouted", "thread/settings/updated"] as const)(
     "keeps %s child metadata when an older lookup finishes later",
     (method) =>
       Effect.scoped(
         Effect.gen(function* () {
           const releaseMetadata = yield* Deferred.make<void>();
           const observed = yield* Deferred.make<void>();
-          const model = "gpt-5.6-sol";
+          const model = method === "model/rerouted" ? "gpt-5.6-sol" : "gpt-6-astra";
           const notification: CodexReplay.CodexAppServerReplayEntry = {
             type: "emit_inbound",
             frame: {
@@ -5254,6 +5457,21 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 fromModel: "gpt-6-astra",
                 toModel: model,
                 reason: "highRiskCyberActivity",
+                ...(method === "thread/settings/updated"
+                  ? {
+                      threadSettings: {
+                        model,
+                        effort: "high",
+                        serviceTier: "fast",
+                        modelProvider: "openai",
+                        cwd: "/workspace",
+                        approvalPolicy: "never",
+                        approvalsReviewer: "auto_review",
+                        collaborationMode: { mode: "default", settings: { model } },
+                        sandboxPolicy: { type: "dangerFullAccess" },
+                      },
+                    }
+                  : {}),
               },
             },
           };
@@ -5287,13 +5505,25 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               ),
             },
             (event) =>
-              event.type === "subagent.updated" && event.subagent.model === model
+              event.type === "subagent.updated" &&
+              event.subagent.model === model &&
+              (method === "model/rerouted" ||
+                event.subagent.modelSelection?.options?.some(
+                  ({ id, value }) => id === "reasoningEffort" && value === "high",
+                ))
                 ? Deferred.succeed(observed, undefined)
                 : Effect.void,
             undefined,
             (threadId) =>
               Deferred.await(releaseMetadata).pipe(
-                Effect.as({ thread: { id: threadId }, model: "gpt-6-astra" }),
+                Effect.as({
+                  thread: {
+                    id: threadId,
+                    model: "gpt-6-astra",
+                    reasoningEffort: "medium",
+                    serviceTier: "flex",
+                  },
+                }),
               ),
           );
           yield* harness.runtime.startTurn(
@@ -5312,8 +5542,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           yield* TestClock.adjust("30 seconds");
           assert.equal(harness.subagentUpdates().at(-1)?.subagent.model, model);
           assert.deepEqual(harness.subagentUpdates().at(-1)?.subagent.modelSelection?.options, [
-            { id: "reasoningEffort", value: "low" },
-            { id: "serviceTier", value: "ultrafast" },
+            { id: "reasoningEffort", value: method === "model/rerouted" ? "low" : "high" },
+            { id: "serviceTier", value: method === "model/rerouted" ? "ultrafast" : "fast" },
           ]);
         }).pipe(
           Effect.provide(

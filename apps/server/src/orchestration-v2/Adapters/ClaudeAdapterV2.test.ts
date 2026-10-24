@@ -2383,6 +2383,44 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
 
+  const observeEffort = (
+    harness: {
+      readonly getOpenedOptions: () => ClaudeAdapterV2.ClaudeAgentSdkQueryOptions | undefined;
+    },
+    agentId: string | undefined,
+    effort?: string,
+    event: "PreToolUse" | "SubagentStop" = "PreToolUse",
+  ) =>
+    Effect.promise(async (signal) => {
+      const callback = harness.getOpenedOptions()?.hooks?.[event]?.[0]?.hooks[0];
+      assert.ok(callback);
+      const common = {
+        session_id: WAKE_NATIVE_SESSION,
+        transcript_path: "/unused/root.jsonl",
+        cwd: "/workspace",
+        ...(agentId === undefined ? {} : { agent_id: agentId }),
+        ...(effort === undefined ? {} : { effort: { level: effort } }),
+      };
+      const input: ClaudeSdk.HookInput =
+        event === "PreToolUse"
+          ? {
+              ...common,
+              hook_event_name: event,
+              tool_name: "Read",
+              tool_input: {},
+              tool_use_id: "read-effort",
+            }
+          : {
+              ...common,
+              hook_event_name: event,
+              agent_id: agentId ?? "",
+              agent_type: "general-purpose",
+              agent_transcript_path: "/unused/child.jsonl",
+              stop_hook_active: false,
+            };
+      assert.deepEqual(await callback(input, undefined, { signal }), {});
+    });
+
   describe("Claude settings restrictions", () => {
     it.effect("resolves cached managed policy from the configured home through the real SDK", () =>
       Effect.gen(function* () {
@@ -10595,7 +10633,205 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
-  it.effect("gives a nested subagent its own effort, else the one its owner runs at", () =>
+  it.effect.each(["before", "after", "stop"] as const)(
+    "uses confirmed child effort from hooks %s registration without inheriting parent options",
+    (timing) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const taskId = "observed-effort-child";
+          const toolUseId = "toolu-observed-effort-child";
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make(`observed-effort-${timing}`),
+              text: "Inspect with a child agent.",
+              attachments: [],
+              modelSelection: {
+                instanceId: CLAUDE_TEST_MODEL_SELECTION.instanceId,
+                model: "claude-opus-4-6",
+                options: [
+                  { id: "effort", value: "high" },
+                  { id: "fastMode", value: true },
+                ],
+              },
+            }),
+          );
+          const latest = () =>
+            harness.events
+              .filter((event) => event.type === "subagent.updated")
+              .findLast((event) => event.subagent.nativeTaskRef?.nativeId === taskId);
+          if (timing === "before") {
+            yield* harness.offerAndWait(
+              makeSubagentTaskStartedFrame({
+                taskId: "effort-probe",
+                toolUseId: "toolu-effort-probe",
+                uuid: "effort-probe-started",
+              }),
+            );
+            yield* observeEffort(harness, taskId, "low");
+            yield* observeEffort(harness, "effort-probe", "medium");
+            yield* harness.until(() =>
+              harness.events.some(
+                (event) =>
+                  event.type === "subagent.updated" &&
+                  event.subagent.nativeTaskRef?.nativeId === "effort-probe" &&
+                  getModelSelectionStringOptionValue(event.subagent.modelSelection, "effort") ===
+                    "medium",
+              ),
+            );
+          }
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({ taskId, toolUseId, uuid: "effort-started" }),
+          );
+          yield* harness.until(() => latest() !== undefined);
+          const child = harness.events
+            .filter((event) => event.type === "app_thread.created")
+            .find((event) => event.appThread.id === latest()?.subagent.childThreadId);
+          assert.deepEqual(child?.appThread.modelSelection, {
+            instanceId: CLAUDE_TEST_MODEL_SELECTION.instanceId,
+            model: "claude-opus-4-6",
+            ...(timing === "before" ? { options: [{ id: "effort", value: "low" }] } : {}),
+          });
+          if (timing !== "before") {
+            assert.isUndefined(
+              getModelSelectionStringOptionValue(latest()?.subagent.modelSelection, "effort"),
+            );
+            yield* observeEffort(
+              harness,
+              taskId,
+              "low",
+              timing === "stop" ? "SubagentStop" : "PreToolUse",
+            );
+          }
+          yield* harness.until(
+            () =>
+              getModelSelectionStringOptionValue(latest()?.subagent.modelSelection, "effort") ===
+              "low",
+          );
+          yield* observeEffort(harness, undefined, "max");
+          yield* observeEffort(harness, taskId, "invalid");
+          yield* observeEffort(harness, taskId);
+          yield* observeEffort(harness, "unrelated-child", "max");
+          yield* harness.offerAndWait(
+            claudeSdkFrame({
+              type: "assistant",
+              parent_tool_use_id: toolUseId,
+              message: {
+                model: "claude-sonnet-4-6",
+                id: "effort-child-model",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "text", text: "Inspecting." }],
+              },
+              uuid: "effort-child-model-frame",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* harness.until(() => latest()?.subagent.model === "claude-sonnet-4-6");
+          assert.equal(
+            getModelSelectionStringOptionValue(latest()?.subagent.modelSelection, "effort"),
+            "low",
+          );
+          yield* harness.offerAndWait(
+            makeSubagentTaskStartedFrame({ taskId, toolUseId, uuid: "effort-repeated-start" }),
+          );
+          yield* harness.offerAndWait(
+            makeSubagentNotificationFrame({
+              taskId,
+              toolUseId,
+              uuid: "effort-completed",
+              summary: "Done without tools.",
+            }),
+          );
+          yield* harness.until(() => latest()?.subagent.status === "completed");
+          assert.equal(
+            getModelSelectionStringOptionValue(latest()?.subagent.modelSelection, "effort"),
+            "low",
+          );
+          yield* observeEffort(harness, taskId, "medium", "SubagentStop");
+          yield* harness.until(
+            () =>
+              getModelSelectionStringOptionValue(latest()?.subagent.modelSelection, "effort") ===
+              "medium",
+          );
+          assert.equal(latest()?.subagent.status, "completed");
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("ignores effort hooks from a closed query after its replacement", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarnessWithOptions({
+          close: Queue.shutdown,
+          freshQueueOnReopen: true,
+        });
+        const turnInput = {
+          threadId: harness.threadId,
+          providerThread: harness.providerThread,
+          now: yield* DateTime.now,
+          text: "Inspect with a child agent.",
+          attachments: [],
+        };
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            ...turnInput,
+            attemptId: RunAttemptId.make("effort-old-query"),
+          }),
+        );
+        const oldOptions = harness.getOpenedOptions();
+        assert.ok(oldOptions);
+        yield* harness.offerAndWait(
+          makeResultFrame({ uuid: "effort-old-result", result: "Done." }),
+        );
+        yield* Queue.take(harness.terminalReceipts);
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            ...turnInput,
+            attemptId: RunAttemptId.make("effort-new-query"),
+            modelSelection: CLAUDE_TEST_RESTART_MODEL_SELECTION,
+          }),
+        );
+        assert.notEqual(harness.getOpenedOptions(), oldOptions);
+        yield* observeEffort({ getOpenedOptions: () => oldOptions }, "effort-reused-id", "max");
+        yield* harness.offerAndWait(
+          makeSubagentTaskStartedFrame({
+            taskId: "effort-reused-id",
+            toolUseId: "effort-new-tool",
+            uuid: "effort-new-start",
+          }),
+        );
+        yield* harness.until(() =>
+          harness.events.some((event) => event.type === "subagent.updated"),
+        );
+        const latest = harness.events.findLast((event) => event.type === "subagent.updated");
+        assert.isUndefined(
+          getModelSelectionStringOptionValue(latest?.subagent.modelSelection, "effort"),
+        );
+        yield* observeEffort(harness, "effort-reused-id", "low");
+        yield* harness.until(() =>
+          harness.events.some(
+            (event) =>
+              event.type === "subagent.updated" &&
+              getModelSelectionStringOptionValue(event.subagent.modelSelection, "effort") === "low",
+          ),
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("keeps observed subagent effort isolated from its parent and nested siblings", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const OUTER_TOOL_USE_ID = "toolu-effort-outer";
@@ -10619,14 +10855,13 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             modelSelection: parentSelection,
           }),
         );
-        const agentCall = (id: string, effort?: string) => ({
+        const agentCall = (id: string) => ({
           type: "tool_use" as const,
           id,
           name: "Agent",
           input: {
             description: id,
             subagent_type: "general-purpose",
-            ...(effort === undefined ? {} : { effort }),
             prompt: "Check one thing.",
           },
         });
@@ -10650,7 +10885,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               id: "msg_nested_effort_outer_launch",
               type: "message",
               role: "assistant",
-              content: [agentCall(OUTER_TOOL_USE_ID, "low")],
+              content: [agentCall(OUTER_TOOL_USE_ID)],
             },
             uuid: "00000000-0000-4000-8000-000000000221",
             session_id: WAKE_NATIVE_SESSION,
@@ -10664,10 +10899,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
               id: "msg_nested_effort_inner_launch",
               type: "message",
               role: "assistant",
-              content: [
-                agentCall(INHERITING_TOOL_USE_ID),
-                agentCall(OVERRIDING_TOOL_USE_ID, "max"),
-              ],
+              content: [agentCall(INHERITING_TOOL_USE_ID), agentCall(OVERRIDING_TOOL_USE_ID)],
             },
             uuid: "00000000-0000-4000-8000-000000000223",
             session_id: WAKE_NATIVE_SESSION,
@@ -10679,9 +10911,41 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             result: "Spawned the subagents.",
           }),
         ]) {
-          yield* Queue.offer(harness.sdkMessages, frame);
+          yield* harness.offerAndWait(frame);
+          if (
+            frame.type === "system" &&
+            frame.subtype === "task_started" &&
+            frame.task_id === `task-${OUTER_TOOL_USE_ID}`
+          ) {
+            yield* observeEffort(harness, frame.task_id, "low");
+            yield* harness.until(() =>
+              harness.events.some(
+                (event) =>
+                  event.type === "subagent.updated" &&
+                  event.subagent.nativeTaskRef?.nativeId === frame.task_id &&
+                  getModelSelectionStringOptionValue(event.subagent.modelSelection, "effort") ===
+                    "low",
+              ),
+            );
+          }
         }
         yield* Queue.take(harness.terminalReceipts);
+
+        yield* observeEffort(harness, `task-${OVERRIDING_TOOL_USE_ID}`, "max");
+        yield* harness.until(() =>
+          [
+            [OUTER_TOOL_USE_ID, "low"],
+            [OVERRIDING_TOOL_USE_ID, "max"],
+          ].every(([id, effort]) =>
+            harness.events.some(
+              (event) =>
+                event.type === "subagent.updated" &&
+                event.subagent.nativeTaskRef?.nativeId === `task-${id}` &&
+                getModelSelectionStringOptionValue(event.subagent.modelSelection, "effort") ===
+                  effort,
+            ),
+          ),
+        );
 
         const efforts = new Map(
           harness.events.flatMap((event) =>
@@ -10697,7 +10961,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         assert.deepEqual(Object.fromEntries(efforts), {
           [`task-${OUTER_TOOL_USE_ID}`]: "low",
-          [`task-${INHERITING_TOOL_USE_ID}`]: "low",
+          [`task-${INHERITING_TOOL_USE_ID}`]: undefined,
           [`task-${OVERRIDING_TOOL_USE_ID}`]: "max",
         });
         const childEfforts = harness.events.flatMap((event) =>
@@ -10705,7 +10969,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             ? [getModelSelectionStringOptionValue(event.appThread.modelSelection, "effort")]
             : [],
         );
-        assert.deepEqual(childEfforts, ["low", "low", "max"]);
+        assert.deepEqual(childEfforts, [undefined, undefined, undefined]);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
