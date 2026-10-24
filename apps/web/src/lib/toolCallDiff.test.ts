@@ -102,6 +102,10 @@ describe("toolCallDiff", () => {
       content: [{ label: "Recorded content after", text: "content" }],
       truncated: true,
     });
+    expect(
+      toolCallDiff({ fileName: "a.ts", diffStr: "@@ -1 +1 @@\n-a\n+b", diffTruncated: true })
+        .truncated,
+    ).toBe(true);
   });
 
   it("preserves complete patches and unsupported provider output", () => {
