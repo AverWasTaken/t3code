@@ -10,7 +10,7 @@ the default branch, and their schedules never run in this fork.
 Once a day (09:17 UTC) and on manual dispatch, `fork-nightly.yml`:
 
 1. Takes `pingdotgg/t3code` `main` and the fork's patch branch
-   (`fix/nested-subagents` by default).
+   (`fix/subagent-reasoning-display` by default).
 2. Skips if the newest release here was already built from the same upstream
    commit and patch-branch commit (dispatch with `force` to build anyway).
 3. Cherry-picks the patch branch's own commits (those since its merge-base with

@@ -17,7 +17,7 @@ on:
       patch_branch:
         description: "Fork branch whose commits (since its merge-base with upstream main) are cherry-picked onto upstream main"
         required: false
-        default: fix/nested-subagents
+        default: fix/subagent-reasoning-display
         type: string
       force:
         description: "Build and publish even if upstream main and the patch branch are unchanged since the last release"
@@ -36,7 +36,7 @@ permissions:
 env:
   UPSTREAM_REPO: pingdotgg/t3code
   UPSTREAM_BRANCH: main
-  PATCH_BRANCH: ${{ inputs.patch_branch || 'fix/nested-subagents' }}
+  PATCH_BRANCH: ${{ inputs.patch_branch || 'fix/subagent-reasoning-display' }}
   # Public T3 Connect build constants. Upstream reads them from its production
   # environment; here they come from optional repository variables. When unset
   # the app builds fine with T3 Connect (relay/Clerk sign-in) disabled.
