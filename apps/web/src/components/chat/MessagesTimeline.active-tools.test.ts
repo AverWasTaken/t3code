@@ -49,3 +49,48 @@ describe("long active tool groups", () => {
     },
   );
 });
+
+describe("inline edits", () => {
+  it.each([false, true])("keeps edits outside collapsed live groups, expanded=%s", (expanded) => {
+    const runId = RunId.make("edit-run");
+    const createdAt = "2026-10-12T00:00:00Z";
+    const timelineEntries = [
+      "command_execution",
+      "file_change",
+      "command_execution",
+      "file_change",
+      "file_change",
+    ].map((itemType, index) => ({
+      id: `entry-${index}`,
+      kind: "work" as const,
+      createdAt,
+      entry: {
+        id: `work-${index}`,
+        createdAt,
+        runId,
+        label: `Tool ${index}`,
+        tone: "tool" as const,
+        itemType: itemType as "command_execution" | "file_change",
+        toolLifecycleStatus: "completed" as const,
+      },
+    }));
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: true,
+      runningRunId: runId,
+      activeTurnStartedAt: createdAt,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+      expandedWorkGroupIds: new Set(expanded ? ["work-group:entry-0", "work-group:entry-2"] : []),
+    });
+    const editRows = rows.filter(
+      (row) =>
+        row.kind === "work" && row.groupedEntries.some((entry) => entry.itemType === "file_change"),
+    );
+    expect(
+      editRows.map((row) =>
+        row.kind === "work" ? row.groupedEntries.map((entry) => entry.id) : [],
+      ),
+    ).toEqual([["work-1"], ["work-3"], ["work-4"]]);
+  });
+});

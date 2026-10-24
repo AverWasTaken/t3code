@@ -1,4 +1,5 @@
 import { TimelinePendingApprovalRow } from "./TimelinePendingApprovalRow";
+import { workEntryExpanded } from "@t3tools/shared/inlineEdit";
 import { WorkLogDetails, WorkLogRow } from "./WorkLog";
 import {
   getQuestionAnswerPreview,
@@ -295,8 +296,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       ? notificationChildThreadId(workEntry.projectedItem.item.source)
       : undefined;
   const groupView = use(WorkGroupViewCtx);
-  const [expanded, setExpanded] = useState(
-    () => groupView?.state.expandedEntries.has(workEntry.id) ?? false,
+  const [expanded, setExpanded] = useState(() =>
+    workEntryExpanded(
+      ctx.workGroupViewState.entryExpansionOverrides.get(workEntry.id) ??
+        (groupView?.state.expandedEntries.has(workEntry.id) ? true : undefined),
+      workEntry.itemType,
+    ),
   );
   const onInitialOutputReady = () => {
     if (groupView) groupView.onContentReady?.(workEntry.id);
@@ -304,6 +309,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
   };
   const toggleExpanded = () => {
     const next = !expanded;
+    ctx.workGroupViewState.entryExpansionOverrides.set(workEntry.id, next);
     if (groupView) {
       groupView.onToggleEntry(!next, workEntry.id);
       if (next) groupView.state.expandedEntries.add(workEntry.id);

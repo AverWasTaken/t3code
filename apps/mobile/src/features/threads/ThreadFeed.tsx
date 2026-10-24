@@ -3,6 +3,7 @@ import { m } from "../../i18n/messages";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { toServerClock } from "@t3tools/client-runtime/clock";
 import { formatDuration } from "@t3tools/shared/orchestrationTimingCopy";
+import { workEntryExpanded } from "@t3tools/shared/inlineEdit";
 import { Button } from "../../components/ui/Button";
 import * as Dialog from "../../components/ui/Dialog";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -3980,7 +3981,13 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const onToggleWorkRow = (rowId: string, anchorKey?: string, groupId?: string) => {
     preserveDisclosurePosition(anchorKey ?? null);
     setInteractionState((current) => {
-      const expanded = !(current.expandedWorkRows[rowId] ?? false);
+      const activity = presentedFeed
+        .flatMap((entry) => (entry.type === "activity-group" ? entry.activities : []))
+        .find((row) => row.id === rowId);
+      const expanded = !workEntryExpanded(
+        current.expandedWorkRows[rowId],
+        activity?.workEntry.itemType,
+      );
       return {
         ...current,
         expandedWorkRows: { ...current.expandedWorkRows, [rowId]: expanded },
@@ -4046,7 +4053,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           return undefined;
         }
         return entry.activities.some(
-          (activity) => activity.prominent || expandedWorkRows[activity.id],
+          (activity) =>
+            activity.prominent ||
+            workEntryExpanded(expandedWorkRows[activity.id], activity.workEntry.itemType),
         )
           ? undefined
           : collapsedWorkLogHeight(entry.activities, entry.continuesWorkLog);
