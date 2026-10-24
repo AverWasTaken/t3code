@@ -1,0 +1,6 @@
+version=0.1.3-nightly.20261024.16
+upstream=pingdotgg/t3code@b24e8ce2df0f09bf01883c6b0010f75497e212b3
+patch_branch=fix/subagent-reasoning-display
+patch_sha=c93be6b2dc5e6cc901ae184dceb5727c34c723ba
+patch_commits=4735abc51b83317fd72941874694f102a170a05b 27d94be350ff74badfc9bb83e1109f1dff527ad1 c93be6b2dc5e6cc901ae184dceb5727c34c723ba
+run=https://github.com/AverWasTaken/t3code/actions/runs/40067839431
