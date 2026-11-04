@@ -493,6 +493,9 @@ export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
 });
 export type PersistedSavedEnvironmentRecord = typeof PersistedSavedEnvironmentRecordSchema.Type;
 
+export const DesktopWindowCloseActionSchema = Schema.Literals(["ask", "quit", "tray"]);
+export type DesktopWindowCloseAction = typeof DesktopWindowCloseActionSchema.Type;
+
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
 
 export const DesktopServerExposureModeSchema = Schema.Literals([
@@ -1075,6 +1078,8 @@ export interface DesktopBridge {
   setLocalEnvironmentEnabled: (enabled: boolean) => Promise<void>;
   /** The environment ID recorded in this app's T3 home, such as its own machine's background service. */
   getHostEnvironmentId?: () => Promise<string | null>;
+  getWindowCloseAction: () => DesktopWindowCloseAction;
+  setWindowCloseAction: (action: DesktopWindowCloseAction) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;

@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { NotificationSettings } from "./NotificationSettings";
+import { WindowCloseActionSetting } from "./WindowCloseActionSetting";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { CheckIcon } from "lucide-react";
 import { msg, T, useGT, useMessages } from "gt-react";
@@ -1039,6 +1040,7 @@ export function GeneralSettingsPanel() {
             }
           />
         ) : null}
+        <WindowCloseActionSetting />
       </SettingsSection>
 
       <SettingsSection id="display" title={gt("Display")}>

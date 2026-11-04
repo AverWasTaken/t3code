@@ -8,6 +8,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -42,9 +43,11 @@ import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopClientSettings from "../settings/DesktopClientSettings.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
+import * as ElectronTray from "../electron/ElectronTray.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { SNAP_SHOT_EVENT_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
@@ -109,6 +112,7 @@ function makeFakeBrowserWindow() {
     focus: vi.fn(),
     getBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
     getNormalBounds: vi.fn(() => ({ x: 0, y: 0, width: 1100, height: 780 })),
+    hide: vi.fn(),
     isDestroyed: vi.fn(() => false),
     isFullScreen: vi.fn(() => false),
     isMaximized: vi.fn(() => false),
@@ -116,6 +120,7 @@ function makeFakeBrowserWindow() {
     isVisible: vi.fn(() => true),
     loadURL: vi.fn(() => Promise.resolve()),
     maximize: vi.fn(),
+    minimize: vi.fn(),
     on: vi.fn((eventName: string, listener: (...args: readonly unknown[]) => void) => {
       windowListeners.set(eventName, listener);
     }),
@@ -136,6 +141,11 @@ function makeFakeBrowserWindow() {
 
   return {
     window: window as unknown as Electron.BrowserWindow,
+    close: window.close,
+    hide: window.hide,
+    isVisible: window.isVisible,
+    minimize: window.minimize,
+    restore: window.restore,
     getBounds: window.getBounds,
     getNormalBounds: window.getNormalBounds,
     isDestroyed: window.isDestroyed,
@@ -207,17 +217,27 @@ const layerElectronTheme = Layer.succeed(ElectronTheme.ElectronTheme, {
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronTheme["Service"]);
 
-const layerDesktopEnvironment = DesktopEnvironment.layer(environmentInput).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      NodeServices.layer,
-      DesktopConfig.layerTest({
-        T3CODE_PORT: "3773",
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
-      }),
+const makeLayerDesktopEnvironment = (platform: NodeJS.Platform) =>
+  DesktopEnvironment.layer({ ...environmentInput, platform }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          T3CODE_PORT: "3773",
+          VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+        }),
+      ),
     ),
-  ),
-);
+  );
+
+const layerDesktopEnvironment = makeLayerDesktopEnvironment(environmentInput.platform);
+
+const layerElectronDialogUnused = Layer.mock(ElectronDialog.ElectronDialog)({});
+
+const layerElectronTrayNoop = Layer.succeed(ElectronTray.ElectronTray, {
+  ensure: () => Effect.void,
+  destroy: Effect.void,
+});
 
 const desktopWindowBoundsEquivalence = Schema.toEquivalence(
   DesktopAppSettings.DesktopWindowBoundsSchema,
@@ -245,6 +265,10 @@ function layerTest(input: {
   readonly focusedWindow?: Electron.BrowserWindow;
   readonly primaryPasteEnabled?: boolean;
   readonly previewPasskeyBridgeEnabled?: boolean;
+  readonly platform?: NodeJS.Platform;
+  readonly icoPath?: string;
+  readonly showMessageBox?: ElectronDialog.ElectronDialog["Service"]["showMessageBox"];
+  readonly ensureTray?: ElectronTray.ElectronTray["Service"]["ensure"];
 }) {
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const layerDesktopAppSettings = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
@@ -277,6 +301,7 @@ function layerTest(input: {
     setWslDistro: () => Effect.die("unexpected WSL distro change"),
     setWslOnly: () => Effect.die("unexpected WSL-only toggle"),
     setLocalEnvironmentEnabled: () => Effect.die("unexpected local environment toggle"),
+    setWindowCloseAction: () => Effect.die("unexpected window close action change"),
     applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
     applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
   } satisfies DesktopAppSettings.DesktopAppSettings["Service"]);
@@ -308,13 +333,29 @@ function layerTest(input: {
   return DesktopWindow.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        layerDesktopAssets,
+        Layer.succeed(DesktopAssets.DesktopAssets, {
+          iconPaths: Effect.succeed({
+            ico: Option.fromNullishOr(input.icoPath),
+            icns: Option.none<string>(),
+            png: Option.none<string>(),
+          }),
+          resolveResourcePath: () => Effect.succeed(Option.none<string>()),
+        } satisfies DesktopAssets.DesktopAssets["Service"]),
         Layer.succeed(DesktopRendererHistory.DesktopRendererHistory, {
           register: () => Effect.void,
           recordMetrics: () => Effect.void,
           shutdown: Effect.void,
         }),
-        layerDesktopEnvironment,
+        input.platform === undefined
+          ? layerDesktopEnvironment
+          : makeLayerDesktopEnvironment(input.platform),
+        Layer.mock(ElectronDialog.ElectronDialog)(
+          input.showMessageBox ? { showMessageBox: input.showMessageBox } : {},
+        ),
+        Layer.succeed(ElectronTray.ElectronTray, {
+          ensure: input.ensureTray ?? (() => Effect.void),
+          destroy: Effect.void,
+        }),
         layerDesktopAppSettings,
         layerDesktopClientSettings,
         layerDesktopServerExposure,
@@ -436,6 +477,8 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             shutdown: Effect.void,
           }),
           layerDesktopEnvironment,
+          layerElectronDialogUnused,
+          layerElectronTrayNoop,
           DesktopAppSettings.layerTest(),
           layerDesktopClientSettings,
           layerDesktopServerExposure,
@@ -1269,6 +1312,157 @@ describe("DesktopWindow", () => {
       }).pipe(Effect.provide(layer));
     }),
   );
+
+  describe("window close on Windows", () => {
+    const withCloseScenario = <A, E>(
+      input: {
+        readonly saved?: DesktopAppSettings.DesktopSettings["windowCloseAction"];
+        readonly icoPath?: string | null;
+        readonly platform?: NodeJS.Platform;
+        readonly showMessageBox?: ElectronDialog.ElectronDialog["Service"]["showMessageBox"];
+        readonly ensureTray?: ElectronTray.ElectronTray["Service"]["ensure"];
+      },
+      run: (scenario: {
+        readonly fake: ReturnType<typeof makeFakeBrowserWindow>;
+        readonly pressX: () => { readonly preventDefault: ReturnType<typeof vi.fn> };
+        readonly quitting: Ref.Ref<boolean>;
+      }) => Effect.Effect<A, E>,
+    ) =>
+      Effect.gen(function* () {
+        const fake = makeFakeBrowserWindow();
+        const layer = layerTest({
+          window: fake.window,
+          createCount: yield* Ref.make(0),
+          mainWindow: yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none()),
+          platform: input.platform ?? "win32",
+          ...(input.icoPath === null ? {} : { icoPath: input.icoPath ?? "/icon.ico" }),
+          desktopSettings: {
+            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+            windowCloseAction: input.saved ?? "ask",
+          },
+          ...(input.showMessageBox ? { showMessageBox: input.showMessageBox } : {}),
+          ...(input.ensureTray ? { ensureTray: input.ensureTray } : {}),
+        });
+        return yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          const state = yield* DesktopState.DesktopState;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+          const pressX = () => {
+            const event = { preventDefault: vi.fn() };
+            fake.windowListeners.get("close")?.(event);
+            return event;
+          };
+          return yield* run({ fake, pressX, quitting: state.quitting });
+        }).pipe(Effect.provide(layer));
+      });
+
+    // Resolves on the fake's first call, so a test can await the forked decision's outcome.
+    const firstCall = (mock: ReturnType<typeof vi.fn>) => {
+      const called = new Promise<void>((resolve) => {
+        mock.mockImplementation(() => resolve());
+      });
+      return Effect.promise(() => called);
+    };
+
+    it.effect("hides to the tray when one can be created", () =>
+      withCloseScenario({ saved: "tray" }, ({ fake, pressX }) =>
+        Effect.gen(function* () {
+          const hidden = firstCall(fake.hide);
+          assert.equal(pressX().preventDefault.mock.calls.length, 1);
+          yield* hidden;
+          assert.equal(fake.minimize.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("minimizes rather than hiding when no tray can exist", () =>
+      Effect.gen(function* () {
+        const trayError = new ElectronTray.ElectronTrayCreateError({
+          iconPath: "/icon.ico",
+          cause: new Error("simulated tray failure"),
+        });
+        for (const input of [
+          { saved: "tray", icoPath: null },
+          { saved: "tray", ensureTray: () => Effect.fail(trayError) },
+        ] as const) {
+          yield* withCloseScenario(input, ({ fake, pressX }) =>
+            Effect.gen(function* () {
+              const minimized = firstCall(fake.minimize);
+              pressX();
+              yield* minimized;
+              assert.equal(fake.hide.mock.calls.length, 0);
+            }),
+          );
+        }
+      }),
+    );
+
+    it.effect("lets the close from a chosen quit through", () =>
+      withCloseScenario({ saved: "quit" }, ({ fake, pressX }) =>
+        Effect.gen(function* () {
+          const closed = firstCall(fake.close);
+          assert.equal(pressX().preventDefault.mock.calls.length, 1);
+          yield* closed;
+          // Electron re-emits close for the window.close() call.
+          assert.equal(pressX().preventDefault.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("lets a close through once quitting and for a hidden window", () =>
+      withCloseScenario({}, ({ fake, pressX, quitting }) =>
+        Effect.gen(function* () {
+          fake.isVisible.mockReturnValue(false);
+          assert.equal(pressX().preventDefault.mock.calls.length, 0);
+          fake.isVisible.mockReturnValue(true);
+          yield* Ref.set(quitting, true);
+          assert.equal(pressX().preventDefault.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("leaves other platforms closing as before", () =>
+      withCloseScenario({ platform: "linux" }, ({ pressX }) =>
+        Effect.sync(() => {
+          assert.equal(pressX().preventDefault.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("keeps one prompt for a second X and allows another after it closes", () =>
+      Effect.gen(function* () {
+        const prompts = yield* Queue.unbounded<Deferred.Deferred<Electron.MessageBoxReturnValue>>();
+        yield* withCloseScenario(
+          {
+            showMessageBox: () =>
+              Effect.gen(function* () {
+                const answer = yield* Deferred.make<Electron.MessageBoxReturnValue>();
+                yield* Queue.offer(prompts, answer);
+                return yield* Deferred.await(answer);
+              }),
+          },
+          ({ fake, pressX }) =>
+            Effect.gen(function* () {
+              const hidden = firstCall(fake.hide);
+
+              pressX();
+              const first = yield* Queue.take(prompts);
+              assert.equal(pressX().preventDefault.mock.calls.length, 1);
+              yield* Deferred.succeed(first, { response: 0, checkboxChecked: false });
+              yield* hidden;
+              // runFork starts a decision eagerly and this fake queues synchronously, so a prompt
+              // from the second X would already be here.
+              assert.equal(yield* Queue.size(prompts), 0);
+
+              // Lets the finished decision release the guard; if it did not, this take never ends.
+              yield* Effect.yieldNow;
+              assert.equal(pressX().preventDefault.mock.calls.length, 1);
+              yield* Queue.take(prompts);
+            }),
+        );
+      }),
+    );
+  });
 
   it.effect("persists the current main window bounds before the window closes", () =>
     Effect.gen(function* () {

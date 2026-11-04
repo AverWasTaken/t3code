@@ -31,6 +31,7 @@ function makeTestWindow(
   let destroyed = false;
   let minimized = true;
   let restored = false;
+  let visible = false;
   let focused = false;
 
   const window = {
@@ -49,6 +50,10 @@ function makeTestWindow(
     restore: () => {
       restored = true;
       minimized = false;
+    },
+    isVisible: () => visible,
+    show: () => {
+      visible = true;
     },
     focus: () => {
       focused = true;
@@ -76,6 +81,7 @@ function makeTestWindow(
     window,
     sentMessages,
     isRestored: () => restored,
+    isShown: () => visible,
     isFocused: () => focused,
     closedListenerCount: () => listeners.get("closed")?.size ?? 0,
     close: () => {
@@ -140,6 +146,7 @@ describe("DesktopSshPasswordPrompts", () => {
       const request = sent.args[0] as { readonly requestId: string; readonly destination: string };
       assert.equal(request.destination, "devbox");
       assert.equal(testWindow.isRestored(), true);
+      assert.equal(testWindow.isShown(), true);
       assert.equal(testWindow.isFocused(), true);
 
       yield* prompts.resolve({ requestId: request.requestId, password: "secret" });

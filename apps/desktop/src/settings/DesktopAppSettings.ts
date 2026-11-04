@@ -3,6 +3,7 @@ import {
   DesktopUpdateChannelSchema,
   type DesktopServerExposureMode,
   type DesktopUpdateChannel,
+  type DesktopWindowCloseAction,
 } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
@@ -35,6 +36,7 @@ export interface DesktopSettings {
   readonly tailscaleServePort: number;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
+  readonly windowCloseAction: DesktopWindowCloseAction;
   readonly wslBackendEnabled: boolean;
   readonly wslDistro: string | null;
   // Requires restart because the pool chooses its primary spec at layer initialization.
@@ -76,6 +78,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
+  windowCloseAction: "ask",
   wslBackendEnabled: false,
   wslDistro: null,
   wslOnly: false,
@@ -98,6 +101,7 @@ const DesktopSettingsDocument = Schema.Struct({
   tailscaleServePort: Schema.optionalKey(Schema.Number),
   updateChannel: Schema.optionalKey(DesktopUpdateChannelSchema),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
+  windowCloseAction: Schema.optionalKey(Schema.Unknown),
   wslBackendEnabled: Schema.optionalKey(Schema.Boolean),
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -163,6 +167,9 @@ export class DesktopAppSettings extends Context.Service<
     readonly setUpdateChannel: (
       channel: DesktopUpdateChannel,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setWindowCloseAction: (
+      action: DesktopWindowCloseAction,
+    ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setWslBackendEnabled: (
       enabled: boolean,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
@@ -191,6 +198,10 @@ function normalizeTailscaleServePort(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535
     ? value
     : DEFAULT_TAILSCALE_SERVE_PORT;
+}
+
+function normalizeWindowCloseAction(value: unknown): DesktopWindowCloseAction {
+  return value === "quit" || value === "tray" ? value : "ask";
 }
 
 function normalizeWslDistro(value: unknown): string | null {
@@ -230,6 +241,7 @@ function normalizeDesktopSettingsDocument(
       ? Option.getOrElse(parsedUpdateChannel, () => defaultSettings.updateChannel)
       : defaultSettings.updateChannel,
     updateChannelConfiguredByUser,
+    windowCloseAction: normalizeWindowCloseAction(parsed.windowCloseAction),
     wslBackendEnabled,
     wslDistro: normalizeWslDistro(parsed.wslDistro),
     wslOnly: parsed.wslOnly === true,
@@ -269,6 +281,9 @@ function toDesktopSettingsDocument(
   }
   if (settings.updateChannelConfiguredByUser !== defaults.updateChannelConfiguredByUser) {
     document.updateChannelConfiguredByUser = settings.updateChannelConfiguredByUser;
+  }
+  if (settings.windowCloseAction !== defaults.windowCloseAction) {
+    document.windowCloseAction = settings.windowCloseAction;
   }
   if (settings.wslBackendEnabled !== defaults.wslBackendEnabled) {
     document.wslBackendEnabled = settings.wslBackendEnabled;
@@ -339,6 +354,15 @@ function setUpdateChannel(
         updateChannel: requestedChannel,
         updateChannelConfiguredByUser: true,
       };
+}
+
+function setWindowCloseAction(
+  settings: DesktopSettings,
+  action: DesktopWindowCloseAction,
+): DesktopSettings {
+  return settings.windowCloseAction === action
+    ? settings
+    : { ...settings, windowCloseAction: action };
 }
 
 function setWslBackendEnabled(settings: DesktopSettings, enabled: boolean): DesktopSettings {
@@ -546,6 +570,11 @@ export const make = Effect.gen(function* () {
 
       return yield* persist((settings) => setUpdateChannel(settings, channel));
     }),
+    setWindowCloseAction: Effect.fn("desktop.settings.setWindowCloseAction")(function* (action) {
+      yield* Effect.annotateCurrentSpan({ action });
+
+      return yield* persist((settings) => setWindowCloseAction(settings, action));
+    }),
     setWslBackendEnabled: Effect.fn("desktop.settings.setWslBackendEnabled")(function* (enabled) {
       yield* Effect.annotateCurrentSpan({ enabled });
 
@@ -615,6 +644,11 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
         setUpdateChannel: Effect.fn("DesktopAppSettings.setUpdateChannel")(function (channel) {
           return update((settings) => setUpdateChannel(settings, channel));
         }),
+        setWindowCloseAction: Effect.fn("DesktopAppSettings.setWindowCloseAction")(
+          function (action) {
+            return update((settings) => setWindowCloseAction(settings, action));
+          },
+        ),
         setWslBackendEnabled: Effect.fn("DesktopAppSettings.setWslBackendEnabled")(
           function (enabled) {
             return update((settings) => setWslBackendEnabled(settings, enabled));
