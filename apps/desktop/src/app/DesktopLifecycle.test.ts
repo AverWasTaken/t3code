@@ -87,6 +87,7 @@ function layerDesktopWindow(
   input: {
     readonly activate?: Effect.Effect<void>;
     readonly flushMainWindowBounds?: Effect.Effect<void>;
+    readonly destroyTray?: Effect.Effect<void>;
   } = {},
 ) {
   return Layer.succeed(DesktopWindow.DesktopWindow, {
@@ -99,6 +100,7 @@ function layerDesktopWindow(
     handleBackendReady: () => Effect.void,
     handleBackendNotReady: Effect.void,
     flushMainWindowBounds: input.flushMainWindowBounds ?? Effect.void,
+    destroyTray: input.destroyTray ?? Effect.void,
     prepareCaptureReveal: Effect.void,
     dispatchMenuAction: () => Effect.void,
     dispatchSnapShotEvent: () => Effect.void,
@@ -114,6 +116,7 @@ describe("DesktopLifecycle", () => {
     (platform) => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
       let windowsDestroyed = false;
+      let trayDestroys = 0;
       const layerEnvironment = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
         platform,
         isDevelopment: false,
@@ -129,7 +132,13 @@ describe("DesktopLifecycle", () => {
             }),
           ),
         ),
-        Layer.provideMerge(layerDesktopWindow()),
+        Layer.provideMerge(
+          layerDesktopWindow({
+            destroyTray: Effect.sync(() => {
+              trayDestroys += 1;
+            }),
+          }),
+        ),
         Layer.provideMerge(layerEnvironment),
         Layer.provideMerge(DesktopShutdown.layer),
         Layer.provideMerge(DesktopState.layer),
@@ -156,6 +165,7 @@ describe("DesktopLifecycle", () => {
             "cancelling this event prevents the updater from completing its relaunch",
           );
           assert.isTrue(windowsDestroyed);
+          assert.equal(trayDestroys, 1);
 
           const state = yield* DesktopState.DesktopState;
           assert.isTrue(yield* Ref.get(state.quitting));
@@ -201,7 +211,14 @@ describe("DesktopLifecycle", () => {
         Layer.provideMerge(layerElectronApp(appListeners, quit)),
         Layer.provideMerge(layerElectronTheme),
         Layer.provideMerge(layerElectronWindow(destroyAll)),
-        Layer.provideMerge(layerDesktopWindow({ flushMainWindowBounds })),
+        Layer.provideMerge(
+          layerDesktopWindow({
+            flushMainWindowBounds,
+            destroyTray: Effect.sync(() => {
+              events.push("tray");
+            }),
+          }),
+        ),
         Layer.provideMerge(layerEnvironment),
         Layer.provideMerge(layerDesktopShutdown),
         Layer.provideMerge(DesktopState.layer),
@@ -220,8 +237,11 @@ describe("DesktopLifecycle", () => {
           yield* Deferred.succeed(allowShutdown, undefined);
           yield* Deferred.await(quitRequested);
 
-          assert.deepEqual(eventsBeforeCleanup, ["flush", "destroy", "request"]);
-          assert.deepEqual(events, ["flush", "destroy", "request", "quit"]);
+          assert.deepEqual(eventsBeforeCleanup, ["flush", "destroy", "tray", "request"]);
+          assert.deepEqual(events, ["flush", "destroy", "tray", "request", "quit"]);
+
+          appListeners.get("will-quit")?.();
+          assert.deepEqual(events, ["flush", "destroy", "tray", "request", "quit", "tray"]);
         }),
       ).pipe(Effect.provide(layer));
     }),

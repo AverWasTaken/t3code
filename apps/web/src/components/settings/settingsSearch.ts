@@ -819,6 +819,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     desktopOnly: true,
   },
   {
+    id: "window-close-action",
+    title: "Close button",
+    to: "/settings/general",
+    searchTerms: ["window x quit exit minimize tray system tray background hide remember"],
+    desktopOnly: true,
+    windowsOnly: true,
+  },
+  {
     id: "text-generation-model",
     title: "Text generation model",
     to: "/settings/threads",

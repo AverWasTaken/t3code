@@ -139,6 +139,12 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   setLocalEnvironmentEnabled: (enabled) =>
     ipcRenderer.invoke(IpcChannels.SET_LOCAL_ENVIRONMENT_ENABLED_CHANNEL, enabled),
   getHostEnvironmentId: () => ipcRenderer.invoke(IpcChannels.GET_HOST_ENVIRONMENT_ID_CHANNEL),
+  getWindowCloseAction: () => {
+    const action = ipcRenderer.sendSync(IpcChannels.GET_WINDOW_CLOSE_ACTION_CHANNEL);
+    return action === "quit" || action === "tray" ? action : "ask";
+  },
+  setWindowCloseAction: (action) =>
+    ipcRenderer.invoke(IpcChannels.SET_WINDOW_CLOSE_ACTION_CHANNEL, action),
   getClientSettings: () => ipcRenderer.invoke(IpcChannels.GET_CLIENT_SETTINGS_CHANNEL),
   setClientSettings: (settings) =>
     ipcRenderer.invoke(IpcChannels.SET_CLIENT_SETTINGS_CHANNEL, settings),

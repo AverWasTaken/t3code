@@ -16,10 +16,12 @@ import * as DesktopAssets from "../app/DesktopAssets.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { makeComponentLogger } from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import { getDesktopUrl } from "../electron/ElectronProtocol.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
+import * as ElectronTray from "../electron/ElectronTray.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import {
   MENU_ACTION_CHANNEL,
@@ -38,6 +40,7 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import { makeQuitShortcutHandler } from "./QuitHold.ts";
 import { copyContextMenuImage } from "./ContextMenuImage.ts";
+import { decideWindowClose } from "./WindowCloseDecision.ts";
 
 const TITLEBAR_HEIGHT = 40;
 
@@ -101,9 +104,11 @@ type DesktopWindowRuntimeServices =
   | DesktopAppSettings.DesktopAppSettings
   | DesktopClientSettings.DesktopClientSettings
   | ElectronApp.ElectronApp
+  | ElectronDialog.ElectronDialog
   | ElectronMenu.ElectronMenu
   | ElectronShell.ElectronShell
   | ElectronTheme.ElectronTheme
+  | ElectronTray.ElectronTray
   | ElectronWindow.ElectronWindow
   | DesktopRendererHistory.DesktopRendererHistory
   | PreviewManager.PreviewManager;
@@ -139,6 +144,7 @@ export class DesktopWindow extends Context.Service<
     readonly zoomMain: (direction: MainWindowZoomDirection) => Effect.Effect<void>;
     readonly runMainContentsCommand: (command: MainWindowContentsCommand) => Effect.Effect<void>;
     readonly syncAppearance: Effect.Effect<void>;
+    readonly destroyTray: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
 
@@ -334,6 +340,7 @@ export const make = Effect.gen(function* () {
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
   const clientSettings = yield* DesktopClientSettings.DesktopClientSettings;
   const electronApp = yield* ElectronApp.ElectronApp;
+  const electronTray = yield* ElectronTray.ElectronTray;
   const rendererHistory = yield* DesktopRendererHistory.DesktopRendererHistory;
   const backendReadyRef = yield* Ref.make(false);
   let backendHasStarted = false;
@@ -380,6 +387,41 @@ export const make = Effect.gen(function* () {
     if (environment.platform === "darwin") syncMacosWindowButtons(window);
     // App zoom propagates to guests; restore each preview's own zoom.
     yield* previewManager.reapplyZoom();
+  });
+
+  const ensureTray = Effect.gen(function* () {
+    const { ico } = yield* assets.iconPaths;
+    if (Option.isNone(ico)) {
+      yield* logWindowWarning("no tray icon available; minimizing instead");
+      return false;
+    }
+    return yield* electronTray
+      .ensure({
+        iconPath: ico.value,
+        tooltip: environment.displayName,
+        showLabel: `Show ${environment.displayName}`,
+        quitLabel: `Quit ${environment.displayName}`,
+        onShow: () => {
+          void runPromise(
+            activate.pipe(
+              Effect.catch((error) =>
+                logWindowWarning("failed to show window from tray", { message: error.message }),
+              ),
+            ),
+          );
+        },
+        onQuit: () => {
+          void runPromise(electronApp.quit);
+        },
+      })
+      .pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          logWindowWarning("failed to create tray icon; minimizing instead", {
+            message: error.message,
+          }).pipe(Effect.as(false)),
+        ),
+      );
   });
 
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
@@ -742,8 +784,47 @@ export const make = Effect.gen(function* () {
     window.on("move", scheduleBoundsPersist);
     window.on("maximize", scheduleBoundsPersist);
     window.on("unmaximize", scheduleBoundsPersist);
-    window.on("close", () => {
+    // Electron re-emits close after a prevented one, so a chosen quit has to get past the handler.
+    let allowClose = false;
+    // Windows leaves a message box's parent enabled, so a second X reaches the handler.
+    let closeDecisionPending = false;
+    const quitFromClose = Effect.sync(() => {
+      if (window.isDestroyed()) return;
+      allowClose = true;
+      window.close();
+    });
+    const hideToTray = Effect.gen(function* () {
+      const trayReady = yield* ensureTray;
+      if (window.isDestroyed()) return;
+      if (!trayReady) {
+        window.minimize();
+        return;
+      }
+      window.hide();
+      yield* logWindowInfo("main window hidden to tray");
+    });
+    window.on("close", (event) => {
       runFork(flushBoundsPersist);
+      if (environment.platform !== "win32") return;
+      // A hidden window is not an X press: taskkill, an installer, or a window not yet revealed.
+      if (allowClose || Ref.getUnsafe(desktopState.quitting) || !window.isVisible()) return;
+      event.preventDefault();
+      if (closeDecisionPending) return;
+      closeDecisionPending = true;
+      runFork(
+        decideWindowClose({
+          window,
+          displayName: environment.displayName,
+          quit: quitFromClose,
+          hideToTray,
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              closeDecisionPending = false;
+            }),
+          ),
+        ),
+      );
     });
 
     if (environment.platform === "darwin") {
@@ -1041,6 +1122,28 @@ export const make = Effect.gen(function* () {
     yield* dispatch;
   });
 
+  const activate = Effect.gen(function* () {
+    if (yield* Ref.get(desktopState.quitting)) return;
+    const existingWindow = yield* currentMainWindow;
+    if (Option.isSome(existingWindow)) {
+      yield* revealMain(existingWindow.value);
+      return;
+    }
+    if (mainClosedDuringStartup) {
+      yield* ensureMain;
+      return;
+    }
+    const backendReady = yield* Ref.get(backendReadyRef);
+    if (!backendReady) {
+      const splash = yield* Ref.get(splashWindowRef);
+      if (Option.isSome(splash)) {
+        yield* electronWindow.reveal(splash.value);
+        return;
+      }
+    }
+    yield* createMainIfBackendReady;
+  }).pipe(Effect.withSpan("desktop.window.activate"));
+
   return DesktopWindow.of({
     createMain: createMain.pipe(Effect.flatMap(requireWindow)),
     ensureMain: ensureMain.pipe(Effect.flatMap(requireWindow)),
@@ -1051,27 +1154,7 @@ export const make = Effect.gen(function* () {
         yield* electronWindow.prepareReveal(existingWindow.value);
       }
     }),
-    activate: Effect.gen(function* () {
-      if (yield* Ref.get(desktopState.quitting)) return;
-      const existingWindow = yield* currentMainWindow;
-      if (Option.isSome(existingWindow)) {
-        yield* revealMain(existingWindow.value);
-        return;
-      }
-      if (mainClosedDuringStartup) {
-        yield* ensureMain;
-        return;
-      }
-      const backendReady = yield* Ref.get(backendReadyRef);
-      if (!backendReady) {
-        const splash = yield* Ref.get(splashWindowRef);
-        if (Option.isSome(splash)) {
-          yield* electronWindow.reveal(splash.value);
-          return;
-        }
-      }
-      yield* createMainIfBackendReady;
-    }).pipe(Effect.withSpan("desktop.window.activate")),
+    activate,
     createMainIfBackendReady,
     showConnectingSplash,
     handleBackendReady: Effect.fn("desktop.window.handleBackendReady")(function* (httpBaseUrl) {
@@ -1123,6 +1206,7 @@ export const make = Effect.gen(function* () {
         syncWindowAppearance(window, shouldUseDarkColors, environment.platform),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
+    destroyTray: electronTray.destroy,
   });
 });
 

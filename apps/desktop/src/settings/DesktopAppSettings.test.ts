@@ -146,6 +146,28 @@ describe("DesktopSettings", () => {
       ),
   );
 
+  it.effect("persists the window close action and treats unknown values as ask", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        const before = yield* settings.get;
+        assert.isTrue((yield* settings.setWindowCloseAction("tray")).changed);
+        assert.deepEqual(yield* settings.load, { ...before, windowCloseAction: "tray" });
+        assert.isFalse((yield* settings.setWindowCloseAction("tray")).changed);
+
+        yield* fileSystem.writeFileString(
+          environment.desktopSettingsPath,
+          JSON.stringify({ windowCloseAction: "explode", wslOnly: true }),
+        );
+        const loaded = yield* settings.load;
+        assert.equal(loaded.windowCloseAction, "ask");
+        assert.isTrue(loaded.wslOnly);
+      }),
+    ),
+  );
+
   it.effect("falls back to defaults when the settings file is malformed", () =>
     withSettings(
       Effect.gen(function* () {
@@ -188,6 +210,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 8443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
+          windowCloseAction: "ask",
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -319,6 +342,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 443,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
+          windowCloseAction: "ask",
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
@@ -348,6 +372,7 @@ describe("DesktopSettings", () => {
           tailscaleServePort: 443,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          windowCloseAction: "ask",
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
