@@ -99,6 +99,7 @@ const requestDesktopShutdownAndWait = Effect.fn("desktop.lifecycle.requestShutdo
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     yield* desktopWindow.flushMainWindowBounds;
     yield* afterBoundsFlush;
+    yield* desktopWindow.destroyTray;
     yield* shutdown.request;
     yield* shutdown.awaitComplete;
   },
@@ -273,6 +274,7 @@ export const make = DesktopLifecycle.of({
       // macOS). Destroy them inline.
       Effect.runSyncWith(context)(
         electronWindow.destroyAll.pipe(
+          Effect.andThen(desktopWindow.destroyTray),
           Effect.andThen(logLifecycleInfo("allowing updater-controlled quit")),
           Effect.catchCause((cause) =>
             logLifecycleError("failed to destroy windows before updater quit", { cause }),
@@ -283,6 +285,9 @@ export const make = DesktopLifecycle.of({
     });
     yield* electronApp.on("before-quit", (event: Electron.Event) => {
       handleBeforeQuit(event, runEffect, quit);
+    });
+    yield* electronApp.on("will-quit", () => {
+      Effect.runSyncWith(context)(desktopWindow.destroyTray);
     });
     yield* electronApp.on("activate", () => {
       void runEffect(

@@ -38,6 +38,8 @@ const DesktopSshPromptPresentationOperation = Schema.Literals([
   "check-window-after-send",
   "check-window-minimized",
   "restore-window",
+  "check-window-visible",
+  "show-window",
   "check-window-after-restore",
   "focus-window",
   "remove-window-close-listener",
@@ -468,6 +470,12 @@ export const make = Effect.fn("desktop.sshPasswordPrompts.make")(function* (
             requestId,
             stage: "after-restore",
           });
+        }
+        const visible = yield* runPresentationOperation("check-window-visible", () =>
+          window.value.isVisible(),
+        );
+        if (!visible) {
+          yield* runPresentationOperation("show-window", () => window.value.show());
         }
         yield* runPresentationOperation("focus-window", () => window.value.focus());
         return yield* waitForPassword;
