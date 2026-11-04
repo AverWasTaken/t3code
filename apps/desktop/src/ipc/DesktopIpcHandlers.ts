@@ -9,6 +9,7 @@ import {
   getLocalEnvironmentEnabled,
   setLocalEnvironmentEnabled,
 } from "./methods/localEnvironment.ts";
+import { getWindowCloseAction, setWindowCloseAction } from "./methods/windowCloseAction.ts";
 import {
   getAdvertisedEndpoints,
   getServerExposureState,
@@ -98,6 +99,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handleSync(getLocalEnvironmentEnabled);
   yield* ipc.handle(setLocalEnvironmentEnabled);
+  yield* ipc.handleSync(getWindowCloseAction);
+  yield* ipc.handle(setWindowCloseAction);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
 
   yield* ipc.handle(getClientSettings);

@@ -488,6 +488,9 @@ export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
 });
 export type PersistedSavedEnvironmentRecord = typeof PersistedSavedEnvironmentRecordSchema.Type;
 
+export const DesktopWindowCloseActionSchema = Schema.Literals(["ask", "quit", "tray"]);
+export type DesktopWindowCloseAction = typeof DesktopWindowCloseActionSchema.Type;
+
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
 
 export const DesktopServerExposureModeSchema = Schema.Literals([
@@ -1046,6 +1049,8 @@ export interface DesktopBridge {
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentEnabled: () => boolean;
   setLocalEnvironmentEnabled: (enabled: boolean) => Promise<void>;
+  getWindowCloseAction: () => DesktopWindowCloseAction;
+  setWindowCloseAction: (action: DesktopWindowCloseAction) => Promise<void>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;

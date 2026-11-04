@@ -149,6 +149,7 @@ function watchGuideRun(
       notification.addEventListener("click", () => {
         notification.close();
         window.focus();
+        void window.desktopBridge?.revealWindow().catch(() => undefined);
         open();
       });
     } catch {
