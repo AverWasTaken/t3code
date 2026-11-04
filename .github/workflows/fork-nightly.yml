@@ -1,17 +1,19 @@
 name: Fork nightly (Windows x64)
 
-# Builds upstream pingdotgg/t3code main + this fork's patch branch as an
-# unsigned Windows x64 nightly and publishes it as a prerelease on this repo,
-# so an installed fork build updates from here. See README.md.
+# DISABLED. Builds moved to the machine hp: ~/t3-fork/update-fork.sh. See README.md.
+# This file stays as a record of the recipe. Do not re-enable it next to the hp pipeline:
+# two builders would race on the same release feed, and the run number here is far
+# below the counter on hp, so its versions would sort as older.
 #
-# The toolchain and packaging steps mirror upstream's release.yml (build_bundle
-# job) and release-desktop.yml (Windows x64 job). Nothing is ever pushed back
-# to a branch: the patched source only exists inside the runners.
+# It built upstream pingdotgg/t3code main + this fork's patch branch as an unsigned
+# Windows x64 nightly and published it as a prerelease on this repo, so an installed
+# fork build updates from here.
+#
+# The toolchain and packaging steps mirror upstream's release.yml (build_bundle job)
+# and release-desktop.yml (Windows x64 job). Nothing is ever pushed back to a branch:
+# the patched source only exists inside the runners.
 
 on:
-  schedule:
-    # Once a day, off the hour.
-    - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
       patch_branch:
