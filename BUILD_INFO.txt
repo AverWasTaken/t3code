@@ -1,0 +1,6 @@
+version=0.1.7-nightly.20261104.102
+upstream=pingdotgg/t3code@a185dd924889cd7f925760431a9f29b973a35e2f
+patch_branch=fix/subagent-reasoning-display
+patch_sha=3fdaf6a779b8c0246cbe104dda3715142a41c3dc
+patch_commits=09f9c00ea3b363ec89cac04940c92246ad94ad18 41594ae48275acfa51f5fc3db609efa911c6ee42 9a7d8188df4d3bfbfd408c28f99082275545cd5f 3fdaf6a779b8c0246cbe104dda3715142a41c3dc
+run=hp/0.1.7-nightly.20261104.102
