@@ -143,6 +143,7 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
   projectByKey: ReadonlyMap<string, EnvironmentProject>;
   projectDisplayNameByKey: ReadonlyMap<string, string>;
   scopedProjectKeys: ReadonlySet<string> | null;
+  hiddenEnvironmentIds: readonly string[];
   routeDraftId: string | null;
   onNavigateToDraft: (draftId: DraftId) => void;
   onDraftContextMenu: (draftId: DraftId, position: { x: number; y: number }) => void;
@@ -183,6 +184,13 @@ export const SidebarDraftBlock = memo(function SidebarDraftBlock(props: {
       if (
         props.scopedProjectKeys !== null &&
         !props.scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+      ) {
+        continue;
+      }
+      // The open draft stays, as the open thread does.
+      if (
+        draftKey !== props.routeDraftId &&
+        props.hiddenEnvironmentIds.includes(session.environmentId)
       ) {
         continue;
       }

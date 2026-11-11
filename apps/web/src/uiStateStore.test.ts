@@ -12,6 +12,8 @@ import {
   reorderProjects,
   resolveProjectExpanded,
   setProjectExpanded,
+  setSidebarHiddenEnvironmentIds,
+  toggleSidebarEnvironmentHidden,
   type UiState,
 } from "./uiStateStore";
 
@@ -20,6 +22,7 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKeys: [],
+    sidebarHiddenEnvironmentIds: [],
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
@@ -81,6 +84,20 @@ describe("uiStateStore pure functions", () => {
     expect(setProjectExpanded(next, keys, false)).toBe(next);
   });
 
+  it("toggles a hidden machine on and off without touching other machines", () => {
+    const hidden = toggleSidebarEnvironmentHidden(
+      makeUiState({ sidebarHiddenEnvironmentIds: ["env-hp"] }),
+      "env-think",
+    );
+    expect(hidden.sidebarHiddenEnvironmentIds).toEqual(["env-hp", "env-think"]);
+    expect(toggleSidebarEnvironmentHidden(hidden, "env-hp").sidebarHiddenEnvironmentIds).toEqual([
+      "env-think",
+    ]);
+    expect(toggleSidebarEnvironmentHidden(hidden, "")).toBe(hidden);
+    expect(setSidebarHiddenEnvironmentIds(hidden, ["env-hp", "env-think"])).toBe(hidden);
+    expect(setSidebarHiddenEnvironmentIds(hidden, []).sidebarHiddenEnvironmentIds).toEqual([]);
+  });
+
   it("moves grouped project members together", () => {
     const keyALocal = "env-local:proj-a";
     const keyARemote = "env-remote:proj-a";
@@ -107,6 +124,7 @@ describe("parsePersistedState", () => {
         invalid: "not-a-date",
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      sidebarHiddenEnvironmentIds: ["env-hp", "", 42 as unknown as string, "env-hp"],
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -126,6 +144,7 @@ describe("parsePersistedState", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKeys: [],
+      sidebarHiddenEnvironmentIds: ["env-hp"],
       pullRequestMergeMethod: "merge",
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
@@ -214,6 +233,7 @@ describe("uiStateStore persistence", () => {
         },
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      sidebarHiddenEnvironmentIds: ["env-hp", "env-think"],
     });
 
     persistState(state);
@@ -232,6 +252,7 @@ describe("uiStateStore persistence", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKeys: [],
       sidebarProjectScopeKey: null,
+      sidebarHiddenEnvironmentIds: ["env-hp", "env-think"],
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {

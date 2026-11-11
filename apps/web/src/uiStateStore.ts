@@ -28,6 +28,7 @@ export interface PersistedUiState {
   defaultAdvertisedEndpointKey?: string | null;
   sidebarProjectScopeKey?: string | null;
   sidebarProjectScopeKeys?: string[];
+  sidebarHiddenEnvironmentIds?: string[];
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
   pullRequestMergeMethod?: string;
@@ -37,6 +38,8 @@ export interface UiProjectState {
   projectExpandedById: Record<string, boolean>;
   projectOrder: string[];
   sidebarProjectScopeKeys: string[];
+  // Per-device: which machines' threads this client hides in the sidebar.
+  sidebarHiddenEnvironmentIds: string[];
 }
 
 export interface UiThreadState {
@@ -59,6 +62,7 @@ const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKeys: [],
+  sidebarHiddenEnvironmentIds: [],
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -154,6 +158,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     sidebarProjectScopeKeys: sanitizeStringArray(
       parsed.sidebarProjectScopeKeys ?? [parsed.sidebarProjectScopeKey],
     ),
+    sidebarHiddenEnvironmentIds: sanitizeStringArray(parsed.sidebarHiddenEnvironmentIds),
     pullRequestMergeMethod: isPullRequestMergeMethod(parsed.pullRequestMergeMethod)
       ? parsed.pullRequestMergeMethod
       : initialState.pullRequestMergeMethod,
@@ -233,6 +238,7 @@ export function persistState(state: UiState): void {
           state.sidebarProjectScopeKeys.length === 1
             ? (state.sidebarProjectScopeKeys[0] ?? null)
             : null,
+        sidebarHiddenEnvironmentIds: state.sidebarHiddenEnvironmentIds,
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
         pullRequestMergeMethod: state.pullRequestMergeMethod,
@@ -345,6 +351,37 @@ function setSidebarProjectScopeKeys(state: UiState, projectKeys: readonly string
   };
 }
 
+// Never pruned against the live environment catalog: it fills in stages at startup.
+export function setSidebarHiddenEnvironmentIds(
+  state: UiState,
+  environmentIds: readonly string[],
+): UiState {
+  const nextIds = sanitizeStringArray(environmentIds);
+  if (
+    nextIds.length === state.sidebarHiddenEnvironmentIds.length &&
+    nextIds.every((id, index) => id === state.sidebarHiddenEnvironmentIds[index])
+  ) {
+    return state;
+  }
+  return {
+    ...state,
+    sidebarHiddenEnvironmentIds: nextIds,
+  };
+}
+
+export function toggleSidebarEnvironmentHidden(state: UiState, environmentId: string): UiState {
+  if (environmentId.length === 0) {
+    return state;
+  }
+  const hidden = state.sidebarHiddenEnvironmentIds;
+  return setSidebarHiddenEnvironmentIds(
+    state,
+    hidden.includes(environmentId)
+      ? hidden.filter((id) => id !== environmentId)
+      : [...hidden, environmentId],
+  );
+}
+
 function setPullRequestMergeMethod(state: UiState, method: PullRequestMergeMethod): UiState {
   return state.pullRequestMergeMethod === method
     ? state
@@ -434,6 +471,8 @@ interface UiStateStore extends UiState {
   setThreadChangedFilesExpanded: (threadId: string, turnId: string, expanded: boolean) => void;
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKeys: (projectKeys: readonly string[]) => void;
+  setSidebarHiddenEnvironmentIds: (environmentIds: readonly string[]) => void;
+  toggleSidebarEnvironmentHidden: (environmentId: string) => void;
   setPullRequestMergeMethod: (method: PullRequestMergeMethod) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
@@ -455,6 +494,10 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setDefaultAdvertisedEndpointKey(state, key)),
   setSidebarProjectScopeKeys: (projectKeys) =>
     set((state) => setSidebarProjectScopeKeys(state, projectKeys)),
+  setSidebarHiddenEnvironmentIds: (environmentIds) =>
+    set((state) => setSidebarHiddenEnvironmentIds(state, environmentIds)),
+  toggleSidebarEnvironmentHidden: (environmentId) =>
+    set((state) => toggleSidebarEnvironmentHidden(state, environmentId)),
   setPullRequestMergeMethod: (method) => set((state) => setPullRequestMergeMethod(state, method)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
