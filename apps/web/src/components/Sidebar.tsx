@@ -273,6 +273,13 @@ import {
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
 import { SidebarDraftBlock, useSidebarDrafts } from "./sidebar/SidebarDraftBlock";
+import { SidebarEnvironmentFilter } from "./sidebar/SidebarEnvironmentFilter";
+import {
+  allOnHiddenEnvironments,
+  filterHiddenEnvironmentThreads,
+  releaseTasksOfHiddenParents,
+  visibleEnvironmentIds,
+} from "./sidebar/environmentVisibility";
 import {
   SidebarProjectFolderHeader,
   sidebarFolderRowId,
@@ -412,6 +419,19 @@ function resolveDraggedOrders(input: {
   };
 }
 
+const DELEGATION_KEYS = {
+  thread: threadShellKey,
+  parent: (thread: EnvironmentThreadShell) =>
+    thread.delegatedFrom == null
+      ? null
+      : {
+          environmentId: thread.delegatedFrom.environmentId,
+          key: scopedThreadKey(
+            scopeThreadRef(thread.delegatedFrom.environmentId, thread.delegatedFrom.threadId),
+          ),
+        },
+};
+
 function routeThreadOnly(
   threads: readonly EnvironmentThreadShell[],
   routeThreadKey: string | null,
@@ -427,6 +447,7 @@ function useSidebarThreads(input: {
   readonly scopedProjectKeys: ReadonlySet<string> | null;
   readonly serverConfigs: ReadonlyMap<EnvironmentId, EnvironmentServerConfig>;
   readonly connectedEnvironmentIds: readonly EnvironmentId[];
+  readonly hiddenEnvironmentIds: readonly string[];
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
@@ -441,6 +462,7 @@ function useSidebarThreads(input: {
     scopedProjectKeys,
     serverConfigs,
     connectedEnvironmentIds,
+    hiddenEnvironmentIds,
     optimisticDrop,
     threads,
     delegatedUnderParent,
@@ -502,7 +524,10 @@ function useSidebarThreads(input: {
     partition;
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const olderSettledShelf = useOlderSettledShelf({
-    scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
+    scopes: olderSettledScopes(
+      visibleEnvironmentIds([...serverConfigs.keys()], hiddenEnvironmentIds),
+      scopedProjectKeys,
+    ),
     expanded: settledShelfExpanded,
     visibleCount: settledVisibleCount,
   });
@@ -922,7 +947,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectGroupByScopeKey,
     projectScopeItems: lookupProjectScopeItems,
   } = useSidebarLookups();
-  const delegatedUnderParent = useDelegatedUnderParent();
+  const allDelegatedUnderParent = useDelegatedUnderParent();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1013,6 +1038,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const projectGroupsRef = useRef(projectGroups);
   const persistedProjectScopeKeys = useUiStateStore((store) => store.sidebarProjectScopeKeys);
   const setPersistedProjectScopeKeys = useUiStateStore((store) => store.setSidebarProjectScopeKeys);
+  const environmentIdentities = useEnvironmentIdentities();
+  const hiddenEnvironmentIds = useUiStateStore((store) => store.sidebarHiddenEnvironmentIds);
+  const setHiddenEnvironmentIds = useUiStateStore((store) => store.setSidebarHiddenEnvironmentIds);
+  const toggleEnvironmentHidden = useUiStateStore((store) => store.toggleSidebarEnvironmentHidden);
   const [projectScopeMenuState, dispatchProjectScopeMenu] = useReducer(
     reduceSidebarProjectScopeMenuState,
     { open: false, query: "" },
@@ -1084,6 +1113,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     setPersistedProjectScopeKeys(keys);
     scrollSidebarToTop(sidebarContentRef.current);
   };
+  // Hiding a machine changes the list the same way a project scope does.
+  const changeHiddenEnvironments = (change: () => void) => {
+    clearSelection();
+    change();
+    scrollSidebarToTop(sidebarContentRef.current);
+  };
   // A scope whose project is gone reads as all projects once every snapshot has
   // loaded. The stored keys are left alone, so the scope returns with its project.
   // An archived project's scope reads as all projects, matching the menu.
@@ -1110,8 +1145,29 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
-  const threads = useQuietThreadShells();
+  const allThreads = useQuietThreadShells();
   const promotingDraftThreadKeys = usePromotingDraftThreadKeys();
+  const routeRowThreadKey =
+    routeThreadRef === null
+      ? null
+      : scopedThreadKey(
+          resolveListedAncestorThreadRef(
+            routeThreadRef,
+            hiddenEnvironmentIds.length === 0
+              ? allThreads
+              : allThreads.filter(
+                  (thread) =>
+                    thread.environmentId === routeThreadRef.environmentId ||
+                    !hiddenEnvironmentIds.includes(thread.environmentId),
+                ),
+          ),
+        );
+  const threads = filterHiddenEnvironmentThreads(
+    allThreads,
+    hiddenEnvironmentIds,
+    routeRowThreadKey,
+    threadShellKey,
+  );
   const listedThreads =
     promotingDraftThreadKeys.length === 0
       ? threads
@@ -1120,10 +1176,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ? asLaunchingThread(thread)
             : thread,
         );
-  const routeRowThreadKey =
-    routeThreadRef === null
-      ? null
-      : scopedThreadKey(resolveListedAncestorThreadRef(routeThreadRef, threads));
+  const delegatedUnderParent = releaseTasksOfHiddenParents(
+    allThreads,
+    allDelegatedUnderParent,
+    hiddenEnvironmentIds,
+    routeRowThreadKey,
+    DELEGATION_KEYS,
+  );
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
   // The open draft's first send names its thread in place; a finalized draft reached by
   // navigation resolves through its redirect instead, and still reveals.
@@ -1140,7 +1199,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     isSearching: isSearchingThreads,
     scopedProjectKeys: chosenScopeProjectKeys,
     delegatedUnderParent,
-    findThread: (key) => threads.find((candidate) => threadShellKey(candidate) === key),
+    findThread: (key) => allThreads.find((candidate) => threadShellKey(candidate) === key),
   });
   const projectScopeKeys = revealWidensScope ? [] : chosenProjectScopeKeys;
   const projectScopeKey = projectScopeKeys.length === 0 ? null : projectScopeKeys.join("\n");
@@ -1196,7 +1255,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const scopedProjectRefs = scopedProjectGroups.flatMap((project) => project.memberProjectRefs);
   const scopedProjectKeys = revealWidensScope ? null : chosenScopeProjectKeys;
   const threadSearch = useThreadSearch(
-    connectedEnvironmentIds,
+    visibleEnvironmentIds(connectedEnvironmentIds, hiddenEnvironmentIds),
     threadSearchQuery,
     scopedProjectGroups.length === 0
       ? {}
@@ -1215,6 +1274,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       if (
         scopedProjectKeys !== null &&
         !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
+      ) {
+        continue;
+      }
+      if (
+        draftKey !== routeDraftIdForRows &&
+        hiddenEnvironmentIds.includes(session.environmentId)
       ) {
         continue;
       }
@@ -1350,6 +1415,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     scopedProjectKeys,
     serverConfigs,
     connectedEnvironmentIds,
+    hiddenEnvironmentIds,
     optimisticDrop,
     threads: listedThreads,
     delegatedUnderParent,
@@ -1361,7 +1427,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         : scopedProjectGroups
       : null,
     keepEmptyFolders: (group) =>
-      scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
+      !allOnHiddenEnvironments(group.memberProjectRefs, hiddenEnvironmentIds) &&
+      (scopedProjectGroups.length > 0 || (group.pinned && !group.archived)),
   });
 
   // Ranked across environments as the palette ranks them, so one
@@ -1443,7 +1510,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const settledThreadKeysRef = useRef(settledThreadKeys);
   const snoozedThreadKeysRef = useRef(snoozedThreadKeys);
 
-  const { draftIds, routeDraftComposer } = useSidebarDrafts(scopedProjectKeys, routeDraftIdForRows);
+  const { draftIds, routeDraftComposer } = useSidebarDrafts(
+    scopedProjectKeys,
+    routeDraftIdForRows,
+    hiddenEnvironmentIds,
+  );
   // Draft rows sit above the threads, so jumps and traversal reach them first.
   // Search hides them, so they drop out while it is open.
   const listedDraftIds = isSearchingThreads ? EMPTY_DRAFT_IDS : draftIds;
@@ -3038,6 +3109,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           <SidebarGroup className="z-[1]">
             <SidebarThreadHeader
               hasProjects={projectGroups.length > 0}
+              environmentFilter={
+                <SidebarEnvironmentFilter
+                  environments={environmentIdentities}
+                  hiddenEnvironmentIds={hiddenEnvironmentIds}
+                  onToggleEnvironment={(environmentId) =>
+                    changeHiddenEnvironments(() => toggleEnvironmentHidden(environmentId))
+                  }
+                  onShowAll={() => changeHiddenEnvironments(() => setHiddenEnvironmentIds([]))}
+                />
+              }
               projectScope={
                 <Combobox
                   items={projectScopeItems}
@@ -3406,6 +3487,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                     <T>Show all projects</T>
                   </button>
                 </>
+              ) : threads.length < allThreads.length ? (
+                <T>No threads on the shown machines</T>
               ) : (
                 <T>No threads yet</T>
               )}

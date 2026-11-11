@@ -174,6 +174,7 @@ function listedDraftComposer(draftId: string | null): ComposerThreadDraftState |
 export function useSidebarDrafts(
   scopedProjectKeys: ReadonlySet<string> | null,
   routeDraftId: string | null,
+  hiddenEnvironmentIds: readonly string[],
 ): { draftIds: readonly DraftId[]; routeDraftComposer: ComposerThreadDraftState | null } {
   const [frozenRoute, setFrozenRoute] = useState<{
     routeDraftId: string | null;
@@ -193,6 +194,9 @@ export function useSidebarDrafts(
           scopedProjectKeys !== null &&
           !scopedProjectKeys.has(`${session.environmentId}:${session.projectId}`)
         ) {
+          continue;
+        }
+        if (draftKey !== routeDraftId && hiddenEnvironmentIds.includes(session.environmentId)) {
           continue;
         }
         const isListed =

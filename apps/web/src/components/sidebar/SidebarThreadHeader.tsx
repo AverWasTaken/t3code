@@ -16,6 +16,8 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 export interface SidebarThreadHeaderProps {
   hasProjects: boolean;
   projectScope: ReactNode;
+  /** Shown whether or not there are projects, so hidden machines can always be shown again. */
+  environmentFilter?: ReactNode;
   onNewProject: () => void;
   onNewThread: (event: ReactMouseEvent) => void;
   newThreadDisabled: boolean;
@@ -35,6 +37,7 @@ export interface SidebarThreadHeaderProps {
 export function SidebarThreadHeader({
   hasProjects,
   projectScope,
+  environmentFilter,
   onNewProject,
   onNewThread,
   newThreadDisabled,
@@ -99,6 +102,7 @@ export function SidebarThreadHeader({
         ) : null}
       </div>
       <div className="flex shrink-0 items-center">
+        {environmentFilter}
         {hasProjects ? (
           <>
             {projectScope}

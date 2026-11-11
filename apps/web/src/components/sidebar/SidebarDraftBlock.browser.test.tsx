@@ -8,8 +8,14 @@ import { formatAssistantCitationForComposer } from "../../composer-logic";
 import { DraftId, useComposerDraftStore } from "../../composerDraftStore";
 import { SidebarDraftBlock, useSidebarDrafts } from "./SidebarDraftBlock";
 
-function DraftBlock() {
-  const { draftIds, routeDraftComposer } = useSidebarDrafts(null, null);
+function DraftBlock({
+  routeDraftId = null,
+  hiddenEnvironmentIds = [],
+}: {
+  routeDraftId?: DraftId | null;
+  hiddenEnvironmentIds?: readonly string[];
+}) {
+  const { draftIds, routeDraftComposer } = useSidebarDrafts(null, routeDraftId, hiddenEnvironmentIds);
   return (
     <SidebarDraftBlock
       draftIds={draftIds}
@@ -17,12 +23,42 @@ function DraftBlock() {
       jumpLabelByDraftId={null}
       projectByKey={new Map()}
       projectDisplayNameByKey={new Map()}
-      routeDraftId={null}
+      routeDraftId={routeDraftId}
       onNavigateToDraft={vi.fn()}
       onDraftContextMenu={vi.fn()}
     />
   );
 }
+
+it("keeps only the open draft listed on a hidden environment", async () => {
+  const initial = useComposerDraftStore.getState();
+  using _store = {
+    [Symbol.dispose]: () => useComposerDraftStore.setState(initial, true),
+  };
+  useComposerDraftStore.setState({
+    draftsByThreadKey: {},
+    draftThreadsByThreadKey: {},
+    logicalProjectDraftThreadKeyByLogicalProjectKey: {},
+  });
+  const environmentId = EnvironmentId.make("hidden-draft-environment");
+  const openDraftId = DraftId.make("open-draft");
+  const hiddenDraftId = DraftId.make("hidden-draft");
+  for (const draftId of [openDraftId, hiddenDraftId]) {
+    initial.setProjectDraftThreadId(scopeProjectRef(environmentId, ProjectId.make(draftId)), draftId, {
+      threadId: ThreadId.make(draftId),
+    });
+    initial.setPrompt(draftId, draftId);
+  }
+
+  await using screen = await render(
+    <ul>
+      <DraftBlock routeDraftId={openDraftId} hiddenEnvironmentIds={[environmentId]} />
+    </ul>,
+  );
+  await expect.element(screen.getByTestId("sidebar-draft-row")).toHaveAccessibleName(
+    `${openDraftId}, Unsent draft`,
+  );
+});
 
 it("keeps draft previews current through edits, promotion and removal", async () => {
   const initial = useComposerDraftStore.getState();
