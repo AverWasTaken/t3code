@@ -976,6 +976,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         // gpt-6-luna declines the write under a read-only sandbox, so nothing asks for approval.
         modelSelection: { ...CODEX_MODEL_SELECTION, model: "gpt-6-sol" },
+        runtimeMode: "approval-required",
         runtimePolicyOverride: READ_ONLY_ON_REQUEST_POLICY,
         assertOutput: assertToolCallReadOnlyOnRequestOutput,
       },
@@ -1059,6 +1060,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         ),
         // gpt-6 uses shell writes; gpt-5.6-terra triggers this fixture's apply_patch approval.
         modelSelection: { ...CODEX_MODEL_SELECTION, model: "gpt-5.6-terra" },
+        runtimeMode: "approval-required",
         runtimePolicyOverride: RESTRICTED_GRANULAR_POLICY,
         assertOutput: assertToolCallRestrictedGranularOutput,
       },
@@ -1146,6 +1148,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         driver: ProviderDriverKind.make("codex"),
         transcriptFile: new URL("./subagent_v2_approval/codex_transcript.ndjson", import.meta.url),
         modelSelection: CODEX_MODEL_SELECTION,
+        runtimeMode: "approval-required",
         runtimePolicyOverride: SUBAGENT_V2_APPROVAL_POLICY,
         assertOutput: assertSubagentV2ApprovalOutput,
       },
@@ -1174,6 +1177,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
           import.meta.url,
         ),
         modelSelection: CODEX_MODEL_SELECTION,
+        runtimeMode: "approval-required",
         runtimePolicyOverride: SUBAGENT_V2_APPROVAL_POLICY,
         assertOutput: assertSubagentV2NestedApprovalOutput,
       },
